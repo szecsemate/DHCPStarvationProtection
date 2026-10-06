@@ -4,16 +4,16 @@ import threading
 import unittest
 from pathlib import Path
 
-from main import (
+from dhcp.protocol import (
     BOOTREQUEST,
     DHCP_ACK,
     DHCP_NAK,
     DHCP_OFFER,
     DHCP_RELEASE,
     MAGIC_COOKIE,
-    DHCPServer,
     parse_options,
 )
+from dhcp.server import DHCPServer
 
 
 SERVER_IP = ipaddress.IPv4Address("192.0.2.1")

@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+
+# Runtime state created by the server.
+dhcp_leases.json
+dhcp_leases.json.*.tmp

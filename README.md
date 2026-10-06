@@ -17,6 +17,27 @@ configuration options.
 
 The server uses only Python's standard library.
 
+## Project structure
+
+The code is organized into a [dhcp](dhcp) package, a [tests](tests) directory,
+and a [docs](docs) directory. See [docs/MODULES.md](docs/MODULES.md) for the
+module dependency diagram and connections between the main functions.
+
+```text
+DHCPStarvationProtection/
+├── dhcp/                  server package
+│   ├── cli.py             command-line configuration and startup
+│   ├── leases.py          lease management and persistence
+│   ├── protocol.py        DHCP packet constants and helpers
+│   └── server.py          DHCP message handling and UDP socket
+├── docs/
+│   └── MODULES.md         module and function connections
+├── tests/
+│   └── test_server.py     server and lease unit tests
+├── main.py                root launcher
+└── README.md
+```
+
 ## Run
 
 Choose a server address and address pool in the same subnet. The server address
@@ -56,6 +77,12 @@ python main.py --server-ip 192.168.1.2 --subnet-mask 255.255.255.0 --pool-start 
 ```
 
 Use `python main.py --help` to see all command-line options.
+
+Run the unit tests with:
+
+```powershell
+python -m unittest
+```
 
 ## Implemented behavior
 

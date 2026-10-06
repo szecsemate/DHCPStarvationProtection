@@ -1,0 +1,281 @@
+"""Lease allocation, reservations, quarantine, and persistent state."""
+
+import json
+import logging
+import math
+import os
+import tempfile
+import threading
+import time
+from pathlib import Path
+
+import ipaddress
+
+from .protocol import Lease, parse_mac
+
+LOG = logging.getLogger("dhcp-server")
+
+
+class LeaseManager:
+    """Own lease state and persist it independently of packet processing."""
+
+    def __init__(
+        self,
+        network,
+        server_ip,
+        pool_start,
+        pool_end,
+        lease_seconds,
+        decline_hold_seconds,
+        lease_file,
+        reservations,
+    ):
+        self.network = network
+        self.server_ip = server_ip
+        self.pool_start = pool_start
+        self.pool_end = pool_end
+        self.lease_seconds = lease_seconds
+        self.decline_hold_seconds = decline_hold_seconds
+        self.lease_file = Path(lease_file) if lease_file else None
+        self.reservations = {}
+        self.reserved_addresses = {}
+        for client, address in reservations:
+            client = parse_mac(client) if isinstance(client, str) else bytes(client)
+            address = ipaddress.IPv4Address(address)
+            if len(client) != 6:
+                raise ValueError("reservation client identifier must be a six-byte MAC")
+            if (
+                address not in self.network
+                or address
+                in (self.network.network_address, self.network.broadcast_address)
+                or address == self.server_ip
+            ):
+                raise ValueError("reserved addresses must be usable addresses in the subnet")
+            if client in self.reservations:
+                raise ValueError("duplicate reservation for {}".format(client.hex(":")))
+            if address in self.reserved_addresses:
+                raise ValueError("address {} is reserved more than once".format(address))
+            self.reservations[client] = address
+            self.reserved_addresses[address] = client
+
+        self.leases = {}
+        self.quarantined = {}
+        self.lock = threading.RLock()
+        if self.lease_file is not None:
+            self.load_state()
+
+    def _address_is_valid(self, client, address):
+        if address is None or address not in self.network:
+            return False
+        if address in (self.network.network_address, self.network.broadcast_address):
+            return False
+        if address == self.server_ip or address in self.quarantined:
+            return False
+        reserved_for = self.reserved_addresses.get(address)
+        if reserved_for is not None:
+            return reserved_for == client
+        if client in self.reservations:
+            return False
+        return int(self.pool_start) <= int(address) <= int(self.pool_end)
+
+    def _persist_state(self):
+        """Atomically replace the state file so interrupted writes don't corrupt it."""
+        if self.lease_file is None:
+            return
+        now_mono = time.monotonic()
+        now_wall = time.time()
+        state = {
+            "version": 1,
+            "leases": [
+                {
+                    "client": client.hex(),
+                    "address": str(lease.address),
+                    "expires_at": now_wall + lease.expires_at - now_mono,
+                }
+                for client, lease in self.leases.items()
+            ],
+            "quarantined": [
+                {"address": str(address), "expires_at": now_wall + expiry - now_mono}
+                for address, expiry in self.quarantined.items()
+            ],
+        }
+        self.lease_file.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = None
+        try:
+            # Keep the temporary file beside the target so replace is atomic
+            # on the same filesystem.
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                dir=str(self.lease_file.parent),
+                prefix=self.lease_file.name + ".",
+                suffix=".tmp",
+                delete=False,
+            ) as state_file:
+                temp_path = Path(state_file.name)
+                json.dump(state, state_file, indent=2)
+                state_file.write("\n")
+                state_file.flush()
+                os.fsync(state_file.fileno())
+            os.replace(str(temp_path), str(self.lease_file))
+        finally:
+            if temp_path is not None and temp_path.exists():
+                temp_path.unlink()
+
+    def load_state(self):
+        """Load valid, unexpired leases and quarantines from the JSON state file."""
+        try:
+            with self.lease_file.open("r", encoding="utf-8") as state_file:
+                state = json.load(state_file)
+        except FileNotFoundError:
+            return
+        if not isinstance(state, dict) or state.get("version") != 1:
+            raise ValueError("unsupported or invalid DHCP lease file format")
+        if not isinstance(state.get("leases"), list) or not isinstance(
+            state.get("quarantined"), list
+        ):
+            raise ValueError("DHCP lease file must contain lease and quarantine lists")
+
+        now_wall = time.time()
+        now_mono = time.monotonic()
+        loaded = {}
+        used_addresses = set()
+        for item in state["leases"]:
+            try:
+                client = bytes.fromhex(item["client"])
+                address = ipaddress.IPv4Address(item["address"])
+                remaining = float(item["expires_at"]) - now_wall
+            except (KeyError, TypeError, ValueError) as error:
+                raise ValueError("invalid entry in DHCP lease file") from error
+            if len(client) != 6 or remaining <= 0:
+                continue
+            if not math.isfinite(remaining):
+                raise ValueError("lease expiry must be a finite timestamp")
+            if client in loaded:
+                LOG.warning("Ignoring duplicate persisted lease for client %s", client.hex())
+                continue
+            if not self._address_is_valid(client, address):
+                LOG.warning("Ignoring persisted lease for invalid address %s", address)
+                continue
+            if address in used_addresses:
+                LOG.warning("Ignoring duplicate persisted lease for %s", address)
+                continue
+            # Persist wall-clock timestamps, but use monotonic time while running
+            # to avoid lease behavior changing when the system clock is adjusted.
+            loaded[client] = Lease(address, now_mono + remaining)
+            used_addresses.add(address)
+
+        quarantined = {}
+        for item in state["quarantined"]:
+            try:
+                address = ipaddress.IPv4Address(item["address"])
+                remaining = float(item["expires_at"]) - now_wall
+            except (KeyError, TypeError, ValueError) as error:
+                raise ValueError("invalid quarantine entry in DHCP lease file") from error
+            if (
+                math.isfinite(remaining)
+                and remaining > 0
+                and address in self.network
+                and (
+                    int(self.pool_start) <= int(address) <= int(self.pool_end)
+                    or address in self.reserved_addresses
+                )
+                and address != self.server_ip
+            ):
+                quarantined[address] = now_mono + remaining
+        self.quarantined = quarantined
+        # Declined addresses must not remain active leases after a restart.
+        self.leases = {
+            client: lease
+            for client, lease in loaded.items()
+            if lease.address not in self.quarantined
+        }
+
+    def expire(self):
+        """Remove expired leases and quarantines, persisting changes when needed."""
+        with self.lock:
+            now = time.monotonic()
+            old_lease_count = len(self.leases)
+            old_quarantine_count = len(self.quarantined)
+            self.leases = {
+                client: lease
+                for client, lease in self.leases.items()
+                if lease.expires_at > now
+            }
+            self.quarantined = {
+                address: expiry
+                for address, expiry in self.quarantined.items()
+                if expiry > now
+            }
+            if (
+                len(self.leases) != old_lease_count
+                or len(self.quarantined) != old_quarantine_count
+            ):
+                self._persist_state()
+
+    def allocate(self, client):
+        """Return a reservation or the first free, non-quarantined pool address."""
+        with self.lock:
+            self.expire()
+            lease = self.leases.get(client)
+            if lease is not None:
+                return lease.address
+
+            used = {lease.address for lease in self.leases.values()}
+            reserved = self.reservations.get(client)
+            if reserved is not None:
+                if reserved in used or reserved in self.quarantined:
+                    return None
+                address = reserved
+            else:
+                address = None
+                for value in range(int(self.pool_start), int(self.pool_end) + 1):
+                    candidate = ipaddress.IPv4Address(value)
+                    if (
+                        candidate not in used
+                        and candidate not in self.reserved_addresses
+                        and candidate not in self.quarantined
+                    ):
+                        address = candidate
+                        break
+            if address is None:
+                return None
+            self.leases[client] = Lease(address, time.monotonic() + self.lease_seconds)
+            self._persist_state()
+            return address
+
+    def assign(self, client, address):
+        """Validate and renew an address without conflicting with another lease."""
+        with self.lock:
+            self.expire()
+            if not self._address_is_valid(client, address):
+                return False
+            if any(
+                owner != client and lease.address == address
+                for owner, lease in self.leases.items()
+            ):
+                return False
+            self.leases[client] = Lease(address, time.monotonic() + self.lease_seconds)
+            self._persist_state()
+            return True
+
+    def release(self, client, address=None):
+        """Release a client's lease if the address agrees with its current lease."""
+        with self.lock:
+            current = self.leases.get(client)
+            if current is None or (address is not None and address != current.address):
+                return False
+            self.leases.pop(client)
+            self._persist_state()
+            return True
+
+    def decline(self, client, address):
+        """Quarantine a declined address only when it is leased to that client."""
+        with self.lock:
+            current = self.leases.get(client)
+            if current is None or current.address != address:
+                return False
+            self.leases.pop(client)
+            self.quarantined[address] = time.monotonic() + self.decline_hold_seconds
+            self._persist_state()
+            return True
