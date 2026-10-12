@@ -6,6 +6,7 @@ import logging
 
 from .protocol import parse_reservation
 from .server import DHCPServer
+from .siem import SIEMService
 
 
 def parse_args():
@@ -35,6 +36,30 @@ def parse_args():
     )
     parser.add_argument("--bind-address", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=67, help="UDP port (default: 67)")
+    parser.add_argument(
+        "--http-bind-address",
+        default="127.0.0.1",
+        help="Lease/SIEM HTTP bind address (default: localhost)",
+    )
+    parser.add_argument(
+        "--http-port", type=int, default=8080, help="Lease/SIEM HTTP port (default: 8080)"
+    )
+    parser.add_argument(
+        "--siem-log-file",
+        default="siem_events.jsonl",
+        help="JSON-lines SIEM audit log file",
+    )
+    parser.add_argument(
+        "--siem-rules-file",
+        default="siem_rules.json",
+        help="JSON file used to persist SIEM rules",
+    )
+    parser.add_argument(
+        "--siem-interval",
+        type=int,
+        default=10,
+        help="Rule evaluation interval in seconds",
+    )
     return parser.parse_args()
 
 
@@ -60,7 +85,17 @@ def main():
             lease_file=args.lease_file,
             reservations=reservations,
         )
-        server.serve_forever()
+        siem = SIEMService(
+            server,
+            log_file=args.siem_log_file,
+            rules_file=args.siem_rules_file,
+            evaluation_interval=args.siem_interval,
+        )
+        try:
+            siem.start_http(args.http_bind_address, args.http_port)
+            server.serve_forever()
+        finally:
+            siem.close()
     except (ipaddress.AddressValueError, ipaddress.NetmaskValueError, ValueError) as error:
         raise SystemExit("Configuration or lease-file error: {}".format(error))
     except OSError as error:

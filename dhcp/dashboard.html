@@ -1,0 +1,553 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Leasewatch | DHCP security console</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0a0e13;
+      --panel: #111821;
+      --panel-raised: #151f2a;
+      --border: #263441;
+      --muted: #8293a3;
+      --text: #e8eef4;
+      --green: #6ee7b7;
+      --cyan: #67d4e8;
+      --amber: #f5bf69;
+      --red: #fa7979;
+      --mono: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-width: 340px; }
+    button, input, select { font: inherit; }
+    button { cursor: pointer; }
+    .layout { min-height: 100vh; display: grid; grid-template-columns: 232px minmax(0, 1fr); }
+    aside {
+      position: sticky; top: 0; height: 100vh; padding: 25px 16px;
+      border-right: 1px solid var(--border); background: #0d1218;
+      display: flex; flex-direction: column;
+    }
+    .brand { display: flex; gap: 12px; align-items: center; padding: 0 8px 28px; }
+    .brand-mark {
+      width: 36px; height: 36px; border-radius: 11px; display: grid; place-items: center;
+      color: #071310; background: var(--green); font-weight: 900; font-size: 20px;
+    }
+    .brand-name { font-size: 15px; font-weight: 750; letter-spacing: .04em; }
+    .brand-sub { color: var(--muted); font-size: 10px; margin-top: 3px; letter-spacing: .13em; text-transform: uppercase; }
+    .nav-label { padding: 12px 10px 8px; color: #607283; font-size: 10px; font-weight: 700; letter-spacing: .13em; text-transform: uppercase; }
+    .nav-link {
+      display: flex; align-items: center; gap: 12px; padding: 11px 12px; margin: 2px 0;
+      border: 0; border-radius: 8px; color: #98a9b8; background: transparent; text-align: left;
+    }
+    .nav-link:hover, .nav-link.active { color: var(--text); background: #19242e; }
+    .nav-link.active { box-shadow: inset 2px 0 var(--green); }
+    .nav-icon { width: 18px; text-align: center; color: var(--cyan); font-family: var(--mono); }
+    .aside-bottom { margin-top: auto; padding: 12px 10px; color: var(--muted); font-size: 11px; line-height: 1.6; }
+    .online-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; background: var(--green); box-shadow: 0 0 10px #6ee7b777; }
+    main { min-width: 0; }
+    header {
+      min-height: 73px; padding: 16px 32px; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: space-between; gap: 20px;
+      background: #0d1218;
+    }
+    .crumb { font-size: 12px; color: var(--muted); }
+    .crumb strong { color: var(--text); font-weight: 600; }
+    .header-right { display: flex; align-items: center; gap: 14px; color: var(--muted); font-size: 12px; }
+    .refresh-note { font-family: var(--mono); font-size: 11px; }
+    .content { max-width: 1500px; margin: auto; padding: 30px 32px 50px; }
+    .page-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; margin-bottom: 24px; }
+    h1 { margin: 0; font-size: 26px; letter-spacing: -.04em; }
+    .subtitle { color: var(--muted); margin-top: 7px; font-size: 13px; }
+    .eyebrow { color: var(--green); font-size: 10px; letter-spacing: .16em; text-transform: uppercase; margin-bottom: 8px; font-weight: 700; }
+    .button {
+      border: 1px solid var(--border); border-radius: 7px; padding: 9px 13px;
+      color: var(--text); background: #17212b; font-size: 12px; font-weight: 650;
+    }
+    .button:hover { border-color: #4b6374; background: #1c2a35; }
+    .button.primary { background: var(--green); border-color: var(--green); color: #07130f; }
+    .button.primary:hover { background: #8cf0c6; }
+    .button.danger { color: var(--red); }
+    .button.small { padding: 6px 9px; font-size: 11px; }
+    .button:disabled { opacity: .55; cursor: wait; }
+    .cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-bottom: 18px; }
+    .card, .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; }
+    .card { min-height: 115px; padding: 17px 18px; }
+    .card-label { color: var(--muted); font-size: 11px; display: flex; justify-content: space-between; }
+    .card-value { margin-top: 13px; font-size: 27px; font-weight: 680; letter-spacing: -.04em; }
+    .card-foot { color: var(--muted); font-size: 10px; margin-top: 4px; }
+    .meter { height: 5px; border-radius: 10px; background: #263541; margin-top: 12px; overflow: hidden; }
+    .meter > span { display: block; height: 100%; background: var(--green); transition: width .3s; }
+    .grid-two { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(270px, .8fr); gap: 16px; margin-bottom: 18px; }
+    .panel { min-width: 0; overflow: hidden; }
+    .panel-head { padding: 15px 18px; display: flex; justify-content: space-between; align-items: center; gap: 12px; border-bottom: 1px solid var(--border); }
+    .panel-title { font-weight: 650; font-size: 13px; }
+    .panel-meta { color: var(--muted); font-size: 11px; }
+    .panel-body { padding: 17px 18px; }
+    .feed { display: grid; gap: 0; }
+    .feed-item { padding: 11px 0; display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; gap: 11px; align-items: start; border-bottom: 1px solid #202b35; }
+    .feed-item:last-child { border-bottom: 0; }
+    .feed-dot { width: 7px; height: 7px; border-radius: 50%; margin-top: 5px; background: var(--cyan); }
+    .feed-dot.alert { background: var(--amber); }
+    .feed-dot.critical { background: var(--red); }
+    .feed-title { font-size: 12px; font-weight: 600; }
+    .feed-detail { margin-top: 4px; color: var(--muted); font: 10px var(--mono); overflow-wrap: anywhere; }
+    .feed-time { color: var(--muted); font: 10px var(--mono); white-space: nowrap; }
+    .rule-mini { display: grid; gap: 12px; }
+    .rule-row { display: flex; justify-content: space-between; gap: 12px; align-items: center; font-size: 12px; }
+    .rule-name { font-weight: 580; }
+    .rule-type { color: var(--muted); font-size: 10px; margin-top: 4px; }
+    .badge { display: inline-flex; align-items: center; border: 1px solid #32584c; border-radius: 99px; color: var(--green); padding: 3px 8px; font-size: 10px; white-space: nowrap; }
+    .badge.off { border-color: #384550; color: #8594a0; }
+    .badge.alert { border-color: #755a31; color: var(--amber); }
+    .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .input, .select {
+      min-width: 0; color: var(--text); background: #0d141b; border: 1px solid var(--border);
+      border-radius: 6px; padding: 9px 10px; font-size: 12px; outline: none;
+    }
+    .input:focus, .select:focus { border-color: #528a7b; box-shadow: 0 0 0 2px #6ee7b71c; }
+    .input::placeholder { color: #627484; }
+    .search { width: min(260px, 100%); }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; text-align: left; white-space: nowrap; }
+    th { padding: 10px 14px; color: #788b9b; background: #10171f; font-size: 10px; text-transform: uppercase; letter-spacing: .09em; font-weight: 650; }
+    td { padding: 11px 14px; border-top: 1px solid #202b35; font-size: 12px; }
+    tbody tr:hover { background: #151f29; }
+    .mono { font-family: var(--mono); font-size: 11px; }
+    .actions { display: flex; gap: 6px; }
+    .empty { padding: 30px 15px; color: var(--muted); text-align: center; font-size: 12px; }
+    .section { display: none; }
+    .section.active { display: block; }
+    .filterbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; padding: 13px 15px; border-bottom: 1px solid var(--border); }
+    .status { min-height: 18px; margin: 0 0 12px; font-size: 12px; color: var(--muted); }
+    .status.error { color: var(--red); }
+    .status.success { color: var(--green); }
+    .modal-backdrop { display: none; position: fixed; inset: 0; z-index: 5; padding: 20px; background: #000a; place-items: center; }
+    .modal-backdrop.open { display: grid; }
+    .modal { width: min(480px, 100%); background: var(--panel); border: 1px solid #344553; border-radius: 12px; box-shadow: 0 20px 80px #0009; }
+    .modal-head { padding: 17px 20px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+    .modal-head h2 { margin: 0; font-size: 15px; }
+    .modal form { padding: 20px; }
+    .field { display: grid; gap: 6px; margin-bottom: 15px; }
+    .field label { color: #a9b6c1; font-size: 11px; }
+    .field .input, .field .select { width: 100%; }
+    .form-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+    .check-row { display: flex; gap: 8px; align-items: center; color: #a9b6c1; font-size: 12px; }
+    .toast { position: fixed; right: 22px; bottom: 22px; z-index: 8; background: #1a2934; border: 1px solid #385164; border-radius: 8px; padding: 12px 16px; max-width: min(420px, calc(100vw - 44px)); font-size: 12px; box-shadow: 0 8px 30px #0007; }
+    .toast.error { border-color: #8b4545; color: #ffaaaa; }
+    @media (max-width: 900px) {
+      .layout { grid-template-columns: 66px minmax(0, 1fr); }
+      aside { padding: 20px 8px; align-items: center; }
+      .brand { padding: 0 0 24px; }
+      .brand-copy, .nav-label, .nav-text, .aside-bottom { display: none; }
+      .nav-link { width: 46px; justify-content: center; padding: 12px 0; }
+      .nav-icon { font-size: 16px; }
+      header { padding: 14px 20px; }
+      .content { padding: 24px 20px 40px; }
+      .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .grid-two { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 560px) {
+      header { padding: 13px 15px; }
+      .content { padding: 20px 13px 32px; }
+      .page-head { align-items: flex-start; flex-direction: column; }
+      .cards { gap: 9px; }
+      .card { min-height: 100px; padding: 13px; }
+      .card-value { font-size: 23px; }
+      .header-right .refresh-note { display: none; }
+      .filterbar { align-items: stretch; }
+      .toolbar { width: 100%; }
+      .search { flex: 1; }
+    }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <aside>
+      <div class="brand">
+        <div class="brand-mark">L</div>
+        <div class="brand-copy"><div class="brand-name">LEASEWATCH</div><div class="brand-sub">DHCP security console</div></div>
+      </div>
+      <div class="nav-label">Workspace</div>
+      <button class="nav-link active" data-view="overview"><span class="nav-icon">◫</span><span class="nav-text">Overview</span></button>
+      <button class="nav-link" data-view="leases"><span class="nav-icon">⌁</span><span class="nav-text">Leases</span></button>
+      <button class="nav-link" data-view="events"><span class="nav-icon">≋</span><span class="nav-text">Event log</span></button>
+      <div class="nav-label">Detection</div>
+      <button class="nav-link" data-view="rules"><span class="nav-icon">◇</span><span class="nav-text">SIEM rules</span></button>
+      <div class="aside-bottom"><span class="online-dot"></span>Services online<br><span id="sidebar-clock"></span></div>
+    </aside>
+    <main>
+      <header>
+        <div class="crumb">Network security <span aria-hidden="true">/</span> <strong id="crumb-title">Overview</strong></div>
+        <div class="header-right"><span><span class="online-dot"></span>API connected</span><span class="refresh-note">AUTO REFRESH 10s</span></div>
+      </header>
+      <div class="content">
+        <div id="status" class="status" role="status" aria-live="polite"></div>
+        <section id="view-overview" class="section active">
+          <div class="page-head">
+            <div><div class="eyebrow">DHCP / SIEM</div><h1>Network overview</h1><div class="subtitle">Lease activity and address-pool security at a glance.</div></div>
+            <button class="button" data-refresh>↻ &nbsp;Refresh data</button>
+          </div>
+          <div class="cards">
+            <div class="card"><div class="card-label">Active leases <span>◉</span></div><div id="stat-leases" class="card-value">—</div><div id="stat-capacity" class="card-foot">Loading pool capacity</div></div>
+            <div class="card"><div class="card-label">Pool utilization <span>▥</span></div><div id="stat-usage" class="card-value">—</div><div class="meter"><span id="usage-meter" style="width:0%"></span></div></div>
+            <div class="card"><div class="card-label">Alerts <span>△</span></div><div id="stat-alerts" class="card-value">—</div><div class="card-foot">Recorded SIEM alerts</div></div>
+            <div class="card"><div class="card-label">Enabled rules <span>◇</span></div><div id="stat-rules" class="card-value">—</div><div class="card-foot">Scheduled detection rules</div></div>
+          </div>
+          <div class="grid-two">
+            <div class="panel"><div class="panel-head"><div class="panel-title">Recent activity</div><button class="button small" data-navigate="events">View event log →</button></div><div id="overview-feed" class="panel-body feed"><div class="empty">Loading events…</div></div></div>
+            <div class="panel"><div class="panel-head"><div class="panel-title">Detection rules</div><button class="button small" data-navigate="rules">Manage →</button></div><div id="overview-rules" class="panel-body rule-mini"><div class="empty">Loading rules…</div></div></div>
+          </div>
+          <div class="panel"><div class="panel-head"><div class="panel-title">Active leases</div><button class="button small" data-navigate="leases">Manage leases →</button></div><div class="table-wrap"><table><thead><tr><th>Client MAC</th><th>IPv4 address</th><th>Expires in</th><th>Status</th></tr></thead><tbody id="overview-leases"></tbody></table></div></div>
+        </section>
+
+        <section id="view-leases" class="section">
+          <div class="page-head"><div><div class="eyebrow">DHCP / INVENTORY</div><h1>Lease management</h1><div class="subtitle">Search clients and administer active address leases.</div></div><button class="button primary" id="open-assign">＋ &nbsp;Assign lease</button></div>
+          <div class="panel">
+            <div class="filterbar"><div><div class="panel-title">Current leases</div><div id="lease-count" class="panel-meta">Loading…</div></div><div class="toolbar"><input id="lease-search" class="input search" placeholder="Search MAC or IPv4…" autocomplete="off"><button class="button" id="lease-search-button">Search</button><button class="button" id="lease-clear">Clear</button></div></div>
+            <div class="table-wrap"><table><thead><tr><th>Client MAC</th><th>IPv4 address</th><th>Expires at</th><th>Remaining</th><th>Actions</th></tr></thead><tbody id="leases-table"></tbody></table></div>
+          </div>
+        </section>
+
+        <section id="view-events" class="section">
+          <div class="page-head"><div><div class="eyebrow">AUDIT / TELEMETRY</div><h1>Event log</h1><div class="subtitle">Search lease lifecycle events and SIEM alerts.</div></div><button class="button" id="events-refresh">↻ &nbsp;Refresh</button></div>
+          <div class="panel">
+            <div class="filterbar"><div><div class="panel-title">JSON audit events</div><div id="event-count" class="panel-meta">Latest events first</div></div><div class="toolbar"><input id="event-search" class="input search" placeholder="Search event, client, address…"><select id="event-type" class="select"><option value="">All event types</option><option>lease_allocated</option><option>lease_assigned</option><option>lease_renewed</option><option>lease_extended</option><option>lease_released</option><option>lease_declined</option><option>lease_expired</option><option>siem_alert</option></select><button class="button" id="event-search-button">Search</button><button class="button" id="event-clear">Clear</button></div></div>
+            <div class="table-wrap"><table><thead><tr><th>Time</th><th>Event</th><th>Client</th><th>Address</th><th>Details</th></tr></thead><tbody id="events-table"></tbody></table></div>
+          </div>
+        </section>
+
+        <section id="view-rules" class="section">
+          <div class="page-head"><div><div class="eyebrow">DETECTION / RESPONSE</div><h1>SIEM rules</h1><div class="subtitle">Configure scheduled rules for starvation and pool-exhaustion signals.</div></div><button class="button primary" id="open-rule">＋ &nbsp;Create rule</button></div>
+          <div class="panel"><div class="panel-head"><div><div class="panel-title">Configured rules</div><div class="panel-meta">Evaluated on the configured SIEM interval</div></div><button class="button small" id="rules-refresh">↻ Refresh</button></div><div class="table-wrap"><table><thead><tr><th>Rule</th><th>Detection</th><th>Threshold</th><th>Status</th><th>Actions</th></tr></thead><tbody id="rules-table"></tbody></table></div></div>
+          <div class="panel" style="margin-top:15px"><div class="panel-head"><div class="panel-title">About built-in protection rules</div></div><div class="panel-body" style="color:var(--muted);font-size:12px;line-height:1.7">Rapid allocation detection flags a burst of lease allocations that may indicate DHCP starvation. High pool utilization highlights address exhaustion risk. Alerts are logged for investigation; these rules are detection-only and do not rate-limit or block DHCP clients.</div></div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <div id="assign-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="assign-title">
+    <div class="modal"><div class="modal-head"><h2 id="assign-title">Assign a lease</h2><button class="button small" data-close="assign-modal" aria-label="Close">×</button></div>
+      <form id="assign-form">            <div class="field"><label for="assign-client">Client MAC address</label><input id="assign-client" class="input" placeholder="02:00:00:00:00:01" required title="Enter a six-byte MAC address"></div><div class="field"><label for="assign-address">IPv4 address</label><input id="assign-address" class="input" placeholder="192.0.2.10" required inputmode="decimal" pattern="(?:[0-9]{1,3}\.){3}[0-9]{1,3}"></div><div class="form-actions"><button type="button" class="button" data-close="assign-modal">Cancel</button><button class="button primary" type="submit">Assign address</button></div></form>
+    </div>
+  </div>
+
+  <div id="rule-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="rule-modal-title">
+    <div class="modal"><div class="modal-head"><h2 id="rule-modal-title">Create SIEM rule</h2><button class="button small" data-close="rule-modal" aria-label="Close">×</button></div>
+      <form id="rule-form">
+        <div class="field"><label for="rule-name">Rule name</label><input id="rule-name" class="input" required maxlength="100" placeholder="Allocation burst"></div>
+        <div class="field"><label for="rule-kind">Detection type</label><select id="rule-kind" class="select"><option value="event_rate">Event rate</option><option value="pool_usage">Pool usage</option></select></div>
+        <div id="event-fields"><div class="field"><label for="rule-event">Event to monitor</label><select id="rule-event" class="select"><option value="lease_allocated">Lease allocated</option><option value="lease_assigned">Lease assigned</option><option value="lease_renewed">Lease renewed</option><option value="lease_declined">Lease declined</option></select></div><div class="field"><label for="rule-threshold">Trigger count</label><input id="rule-threshold" class="input" type="number" min="1" max="1000000" value="10"></div><div class="field"><label for="rule-window">Time window (seconds)</label><input id="rule-window" class="input" type="number" min="1" max="31536000" value="60"></div></div>
+        <div id="pool-fields" hidden><div class="field"><label for="rule-percent">Pool utilization threshold (%)</label><input id="rule-percent" class="input" type="number" min="1" max="100" value="80"></div></div>
+        <label class="check-row"><input id="rule-enabled" type="checkbox" checked> Enable this rule</label>
+        <div class="form-actions"><button type="button" class="button" data-close="rule-modal">Cancel</button><button class="button primary" type="submit">Save rule</button></div>
+      </form>
+    </div>
+  </div>
+  <div id="toast" class="toast" hidden></div>
+
+  <script>
+    (() => {
+      "use strict";
+      const $ = (selector) => document.querySelector(selector);
+      const state = { leases: [], events: [], rules: [], view: "overview", busy: false };
+      const eventNames = {
+        lease_allocated: "Lease allocated", lease_assigned: "Lease assigned",
+        lease_renewed: "Lease renewed", lease_extended: "Lease extended",
+        lease_released: "Lease released", lease_declined: "Lease declined",
+        lease_expired: "Lease expired", siem_alert: "SIEM alert"
+      };
+      const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (ch) =>
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]
+      );
+      const dateText = (value) => {
+        const date = new Date(value);
+        return Number.isNaN(date.getTime()) ? String(value ?? "—") : date.toLocaleString();
+      };
+      const timeRemaining = (seconds) => {
+        if (seconds <= 0) return "Expired";
+        const hours = Math.floor(seconds / 3600);
+        const minutes = Math.floor((seconds % 3600) / 60);
+        return hours ? `${hours}h ${minutes}m` : `${Math.max(1, minutes)}m`;
+      };
+      async function api(path, options = {}) {
+        const response = await fetch(path, {
+          ...options,
+          headers: { "Content-Type": "application/json", ...(options.headers || {}) }
+        });
+        let body;
+        try { body = await response.json(); }
+        catch { throw new Error(`Server returned invalid data (${response.status})`); }
+        if (!response.ok) throw new Error(body.error || `Request failed (${response.status})`);
+        return body;
+      }
+      function toast(message, error = false) {
+        const node = $("#toast");
+        node.textContent = message;
+        node.classList.toggle("error", error);
+        node.hidden = false;
+        clearTimeout(toast.timer);
+        toast.timer = setTimeout(() => { node.hidden = true; }, 3800);
+      }
+      function setStatus(message = "", error = false) {
+        const node = $("#status");
+        node.textContent = message;
+        node.classList.toggle("error", error);
+      }
+      function cell(value, className = "") {
+        const node = document.createElement("td");
+        node.className = className;
+        node.textContent = value ?? "—";
+        return node;
+      }
+      function emptyRow(target, columns, message) {
+        const row = document.createElement("tr");
+        const item = document.createElement("td");
+        item.colSpan = columns;
+        item.className = "empty";
+        item.textContent = message;
+        row.append(item);
+        target.replaceChildren(row);
+      }
+      async function refresh() {
+        try {
+          const [leaseResult, eventResult, ruleResult, alertResult] = await Promise.all([
+            api("/api/leases?limit=1000"),
+            api("/api/logs?limit=100"),
+            api("/api/rules"),
+            api("/api/logs?event=siem_alert&limit=1000")
+          ]);
+          state.leases = leaseResult.leases || [];
+          state.events = (eventResult.events || []).slice().reverse();
+          state.rules = ruleResult.rules || [];
+          renderOverview(alertResult.count || 0);
+          renderLeases(state.leases);
+          renderEvents(state.events);
+          renderRules(state.rules);
+          setStatus("");
+        } catch (error) {
+          setStatus(`Could not load dashboard data: ${error.message}`, true);
+          $("#overview-feed").innerHTML = `<div class="empty">Unable to load events. ${escapeHtml(error.message)}</div>`;
+        }
+      }
+      function renderOverview(alertCount) {
+        const used = state.leases.length;
+        const capacity = Math.max(0, Number($("#stat-capacity").dataset.capacity || 0));
+        // The server provides current leases; pool capacity is refreshed by the stats endpoint below.
+        const percent = capacity ? Math.min(100, Math.round(used * 100 / capacity)) : 0;
+        $("#stat-leases").textContent = used;
+        $("#stat-alerts").textContent = alertCount;
+        $("#stat-rules").textContent = `${state.rules.filter((rule) => rule.enabled).length}/${state.rules.length}`;
+        $("#stat-usage").textContent = capacity ? `${percent}%` : "—";
+        $("#usage-meter").style.width = `${percent}%`;
+        $("#usage-meter").style.background = percent >= 80 ? "var(--amber)" : "var(--green)";
+        $("#stat-capacity").textContent = capacity ? `of ${capacity} dynamic addresses` : "Pool capacity unavailable";
+        const feed = $("#overview-feed");
+        if (!state.events.length) feed.innerHTML = '<div class="empty">No events have been recorded yet.</div>';
+        else feed.innerHTML = state.events.slice(0, 6).map((event) => {
+          const alert = event.event === "siem_alert";
+          const title = event.event === "siem_alert" ? event.rule_name || "SIEM alert" : eventNames[event.event] || event.event;
+          const detail = [event.client, event.address, event.details].filter(Boolean).join(" · ");
+          return `<div class="feed-item"><span class="feed-dot ${alert ? "alert" : ""}"></span><div><div class="feed-title">${escapeHtml(title)}</div><div class="feed-detail">${escapeHtml(detail || "DHCP activity")}</div></div><span class="feed-time">${escapeHtml(dateText(event.timestamp))}</span></div>`;
+        }).join("");
+        const rules = $("#overview-rules");
+        if (!state.rules.length) rules.innerHTML = '<div class="empty">No detection rules configured.</div>';
+        else rules.innerHTML = state.rules.slice(0, 5).map((rule) =>
+          `<div class="rule-row"><div><div class="rule-name">${escapeHtml(rule.name)}</div><div class="rule-type">${escapeHtml(rule.type === "event_rate" ? `${rule.event_type} · ${rule.threshold} / ${rule.window_seconds}s` : `Pool utilization · ${rule.threshold_percent}%`)}</div></div><span class="badge ${rule.enabled ? "" : "off"}">${rule.enabled ? "Enabled" : "Paused"}</span></div>`
+        ).join("");
+        const overview = $("#overview-leases");
+        if (!state.leases.length) emptyRow(overview, 4, "No active leases.");
+        else {
+          overview.replaceChildren();
+          state.leases.slice(0, 6).forEach((lease) => {
+            const row = document.createElement("tr");
+            row.append(cell(lease.client, "mono"), cell(lease.address, "mono"), cell(timeRemaining(lease.remaining_seconds)), cell("Active"));
+            overview.append(row);
+          });
+        }
+      }
+      function renderLeases(leases) {
+        $("#lease-count").textContent = `${leases.length} active lease${leases.length === 1 ? "" : "s"}`;
+        const tbody = $("#leases-table");
+        if (!leases.length) { emptyRow(tbody, 5, "No matching active leases."); return; }
+        tbody.replaceChildren();
+        leases.forEach((lease) => {
+          const row = document.createElement("tr");
+          row.append(cell(lease.client, "mono"), cell(lease.address, "mono"), cell(dateText(lease.expires_at)), cell(timeRemaining(lease.remaining_seconds)));
+          const actions = document.createElement("td");
+          actions.innerHTML = `<div class="actions"><button class="button small" data-action="renew" data-client="${escapeHtml(lease.client)}">Renew</button><button class="button small" data-action="extend" data-client="${escapeHtml(lease.client)}">+1h</button><button class="button small danger" data-action="release" data-client="${escapeHtml(lease.client)}">Release</button></div>`;
+          row.append(actions);
+          tbody.append(row);
+        });
+      }
+      function renderEvents(events) {
+        $("#event-count").textContent = `${events.length} events · newest first`;
+        const tbody = $("#events-table");
+        if (!events.length) { emptyRow(tbody, 5, "No matching events."); return; }
+        tbody.replaceChildren();
+        events.forEach((event) => {
+          const row = document.createElement("tr");
+          const type = event.event === "siem_alert" ? `${eventNames[event.event]} · ${event.severity || "alert"}` : eventNames[event.event] || event.event;
+          row.append(cell(dateText(event.timestamp)), cell(type), cell(event.client || "—", "mono"), cell(event.address || "—", "mono"), cell(event.details || event.rule_name || (event.seconds ? `+${event.seconds}s` : "—")));
+          tbody.append(row);
+        });
+      }
+      function renderRules(rules) {
+        const tbody = $("#rules-table");
+        if (!rules.length) { emptyRow(tbody, 5, "No SIEM rules configured."); return; }
+        tbody.replaceChildren();
+        rules.forEach((rule) => {
+          const row = document.createElement("tr");
+          row.append(cell(rule.name));
+          row.append(cell(rule.type === "event_rate" ? "Event rate" : "Pool utilization"));
+          row.append(cell(rule.type === "event_rate" ? `${rule.threshold} events / ${rule.window_seconds}s (${eventNames[rule.event_type] || rule.event_type})` : `${rule.threshold_percent}% pool usage`));
+          row.append(cell(rule.enabled ? "Enabled" : "Paused"));
+          const actions = document.createElement("td");
+          actions.innerHTML = `<div class="actions"><button class="button small" data-action="toggle-rule" data-id="${escapeHtml(rule.id)}" data-enabled="${rule.enabled}">${rule.enabled ? "Pause" : "Enable"}</button><button class="button small danger" data-action="delete-rule" data-id="${escapeHtml(rule.id)}">Delete</button></div>`;
+          row.append(actions);
+          tbody.append(row);
+        });
+      }
+      async function searchLeases() {
+        const term = $("#lease-search").value.trim();
+        const query = new URLSearchParams({ limit: "1000" });
+        if (term) query.set("q", term);
+        try { const result = await api(`/api/leases?${query}`); renderLeases(result.leases || []); }
+        catch (error) { toast(error.message, true); }
+      }
+      async function searchEvents() {
+        const query = new URLSearchParams({ limit: "1000" });
+        const term = $("#event-search").value.trim();
+        const eventType = $("#event-type").value;
+        if (term) query.set("q", term);
+        if (eventType) query.set("event", eventType);
+        try { const result = await api(`/api/logs?${query}`); renderEvents((result.events || []).reverse()); }
+        catch (error) { toast(error.message, true); }
+      }
+      function navigate(view) {
+        state.view = view;
+        document.querySelectorAll(".section").forEach((section) => section.classList.toggle("active", section.id === `view-${view}`));
+        document.querySelectorAll(".nav-link").forEach((link) => link.classList.toggle("active", link.dataset.view === view));
+        const title = ({ overview: "Overview", leases: "Leases", events: "Event log", rules: "SIEM rules" })[view];
+        $("#crumb-title").textContent = title;
+        if (view === "leases") searchLeases();
+        if (view === "events") searchEvents();
+        if (view === "rules") refreshRules();
+      }
+      async function refreshRules() {
+        try { const result = await api("/api/rules"); state.rules = result.rules || []; renderRules(state.rules); renderOverview(Number($("#stat-alerts").textContent) || 0); }
+        catch (error) { toast(error.message, true); }
+      }
+      async function leaseAction(button) {
+        const client = button.dataset.client;
+        const action = button.dataset.action;
+        button.disabled = true;
+        try {
+          if (action === "renew") await api(`/api/leases/${encodeURIComponent(client)}/renew`, { method: "POST" });
+          else if (action === "extend") await api(`/api/leases/${encodeURIComponent(client)}/extend`, { method: "POST", body: JSON.stringify({ seconds: 3600 }) });
+          else if (action === "release") {
+            if (!confirm(`Release the lease for ${client}?`)) return;
+            await api(`/api/leases/${encodeURIComponent(client)}`, { method: "DELETE" });
+          }
+          toast(action === "release" ? "Lease released." : action === "renew" ? "Lease renewed." : "Lease extended by one hour.");
+          await refresh();
+          if (state.view === "leases") await searchLeases();
+        } catch (error) { toast(error.message, true); }
+        finally { button.disabled = false; }
+      }
+      async function ruleAction(button) {
+        const id = button.dataset.id;
+        try {
+          if (button.dataset.action === "toggle-rule") {
+            await api(`/api/rules/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ enabled: button.dataset.enabled !== "true" }) });
+            toast(button.dataset.enabled === "true" ? "Rule paused." : "Rule enabled.");
+          } else {
+            const rule = state.rules.find((item) => item.id === id);
+            if (!confirm(`Delete the rule "${rule?.name || id}"?`)) return;
+            await api(`/api/rules/${encodeURIComponent(id)}`, { method: "DELETE" });
+            toast("Rule deleted.");
+          }
+          await refreshRules();
+        } catch (error) { toast(error.message, true); }
+      }
+      $("#lease-search-button").addEventListener("click", searchLeases);
+      $("#lease-search").addEventListener("keydown", (event) => { if (event.key === "Enter") searchLeases(); });
+      $("#lease-clear").addEventListener("click", () => { $("#lease-search").value = ""; searchLeases(); });
+      $("#event-search-button").addEventListener("click", searchEvents);
+      $("#event-search").addEventListener("keydown", (event) => { if (event.key === "Enter") searchEvents(); });
+      $("#event-type").addEventListener("change", searchEvents);
+      $("#event-clear").addEventListener("click", () => { $("#event-search").value = ""; $("#event-type").value = ""; searchEvents(); });
+      $("#events-refresh").addEventListener("click", searchEvents);
+      $("#rules-refresh").addEventListener("click", refreshRules);
+      document.querySelectorAll("[data-refresh]").forEach((button) => button.addEventListener("click", refresh));
+      document.querySelectorAll("[data-navigate]").forEach((button) => button.addEventListener("click", () => navigate(button.dataset.navigate)));
+      document.querySelectorAll(".nav-link").forEach((button) => button.addEventListener("click", () => navigate(button.dataset.view)));
+      document.body.addEventListener("click", (event) => {
+        const button = event.target.closest("button[data-action]");
+        if (!button) return;
+        if (button.dataset.action === "toggle-rule" || button.dataset.action === "delete-rule") ruleAction(button);
+        else leaseAction(button);
+      });
+      function openModal(id) { $(`#${id}`).classList.add("open"); }
+      function closeModal(id) { $(`#${id}`).classList.remove("open"); }
+      document.querySelectorAll("[data-close]").forEach((button) => button.addEventListener("click", () => closeModal(button.dataset.close)));
+      document.querySelectorAll(".modal-backdrop").forEach((backdrop) => backdrop.addEventListener("click", (event) => { if (event.target === backdrop) backdrop.classList.remove("open"); }));
+      $("#open-assign").addEventListener("click", () => openModal("assign-modal"));
+      $("#assign-form").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const client = $("#assign-client").value.trim();
+        try {
+          await api(`/api/leases/${encodeURIComponent(client)}`, { method: "PUT", body: JSON.stringify({ address: $("#assign-address").value.trim() }) });
+          closeModal("assign-modal");
+          event.target.reset();
+          toast("Lease assigned.");
+          await refresh();
+          navigate("leases");
+        } catch (error) { toast(error.message, true); }
+      });
+      $("#open-rule").addEventListener("click", () => openModal("rule-modal"));
+      $("#rule-kind").addEventListener("change", () => {
+        const pool = $("#rule-kind").value === "pool_usage";
+        $("#event-fields").hidden = pool;
+        $("#pool-fields").hidden = !pool;
+      });
+      $("#rule-form").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const rule = { name: $("#rule-name").value.trim(), type: $("#rule-kind").value, enabled: $("#rule-enabled").checked };
+        if (rule.type === "event_rate") {
+          rule.event_type = $("#rule-event").value;
+          rule.threshold = Number($("#rule-threshold").value);
+          rule.window_seconds = Number($("#rule-window").value);
+        } else rule.threshold_percent = Number($("#rule-percent").value);
+        try {
+          await api("/api/rules", { method: "POST", body: JSON.stringify(rule) });
+          closeModal("rule-modal");
+          event.target.reset();
+          $("#rule-kind").value = "event_rate";
+          $("#event-fields").hidden = false;
+          $("#pool-fields").hidden = true;
+          toast("SIEM rule created.");
+          await refreshRules();
+        } catch (error) { toast(error.message, true); }
+      });
+      $("#sidebar-clock").textContent = new Date().toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+      async function loadPoolStats() {
+        try {
+          const result = await api("/api/stats");
+          $("#stat-capacity").dataset.capacity = result.pool_capacity;
+          renderOverview(Number($("#stat-alerts").textContent) || 0);
+        } catch (error) {
+          $("#stat-capacity").textContent = `Pool stats unavailable: ${error.message}`;
+        }
+      }
+      refresh().then(loadPoolStats);
+      setInterval(() => { refresh(); }, 10000);
+    })();
+  </script>
+</body>
+</html>

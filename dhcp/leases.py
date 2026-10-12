@@ -61,8 +61,13 @@ class LeaseManager:
         self.leases = {}
         self.quarantined = {}
         self.lock = threading.RLock()
+        self.event_callback = None
         if self.lease_file is not None:
             self.load_state()
+
+    def _record_event(self, event_type, **fields):
+        if self.event_callback is not None:
+            self.event_callback(event_type, **fields)
 
     def _address_is_valid(self, client, address):
         if address is None or address not in self.network:
@@ -197,6 +202,11 @@ class LeaseManager:
             now = time.monotonic()
             old_lease_count = len(self.leases)
             old_quarantine_count = len(self.quarantined)
+            expired_leases = [
+                (client, lease)
+                for client, lease in self.leases.items()
+                if lease.expires_at <= now
+            ]
             self.leases = {
                 client: lease
                 for client, lease in self.leases.items()
@@ -212,6 +222,12 @@ class LeaseManager:
                 or len(self.quarantined) != old_quarantine_count
             ):
                 self._persist_state()
+            for client, lease in expired_leases:
+                self._record_event(
+                    "lease_expired",
+                    client=client.hex(":"),
+                    address=str(lease.address),
+                )
 
     def allocate(self, client):
         """Return a reservation or the first free, non-quarantined pool address."""
@@ -242,6 +258,9 @@ class LeaseManager:
                 return None
             self.leases[client] = Lease(address, time.monotonic() + self.lease_seconds)
             self._persist_state()
+            self._record_event(
+                "lease_allocated", client=client.hex(":"), address=str(address)
+            )
             return address
 
     def assign(self, client, address):
@@ -255,8 +274,33 @@ class LeaseManager:
                 for owner, lease in self.leases.items()
             ):
                 return False
+            previous = self.leases.get(client)
             self.leases[client] = Lease(address, time.monotonic() + self.lease_seconds)
             self._persist_state()
+            self._record_event(
+                "lease_renewed" if previous is not None else "lease_assigned",
+                client=client.hex(":"),
+                address=str(address),
+            )
+            return True
+
+    def extend(self, client, seconds):
+        """Extend an active lease by a positive number of seconds."""
+        if isinstance(seconds, bool) or not isinstance(seconds, int) or not 1 <= seconds <= 0xFFFFFFFF:
+            raise ValueError("lease extension must be between 1 and 4294967295 seconds")
+        with self.lock:
+            self.expire()
+            lease = self.leases.get(client)
+            if lease is None:
+                return False
+            lease.expires_at += seconds
+            self._persist_state()
+            self._record_event(
+                "lease_extended",
+                client=client.hex(":"),
+                address=str(lease.address),
+                seconds=seconds,
+            )
             return True
 
     def release(self, client, address=None):
@@ -267,6 +311,9 @@ class LeaseManager:
                 return False
             self.leases.pop(client)
             self._persist_state()
+            self._record_event(
+                "lease_released", client=client.hex(":"), address=str(current.address)
+            )
             return True
 
     def decline(self, client, address):
@@ -278,4 +325,7 @@ class LeaseManager:
             self.leases.pop(client)
             self.quarantined[address] = time.monotonic() + self.decline_hold_seconds
             self._persist_state()
+            self._record_event(
+                "lease_declined", client=client.hex(":"), address=str(address)
+            )
             return True

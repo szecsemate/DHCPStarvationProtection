@@ -4,3 +4,6 @@ __pycache__/
 # Runtime state created by the server.
 dhcp_leases.json
 dhcp_leases.json.*.tmp
+siem_events.jsonl
+siem_rules.json
+siem_rules.json.*.tmp

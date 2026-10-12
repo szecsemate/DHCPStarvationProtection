@@ -10,10 +10,12 @@ travels through the code. Start the program from the repository root with
 main.py                  root launcher
   └── dhcp/cli.py        command-line setup
         ├── dhcp/protocol.py
-        └── dhcp/server.py
-              ├── dhcp/protocol.py
-              └── dhcp/leases.py
-                    └── dhcp/protocol.py
+        ├── dhcp/server.py
+        │     ├── dhcp/protocol.py
+        │     └── dhcp/leases.py
+        │           └── dhcp/protocol.py
+        └── dhcp/siem.py
+              └── dhcp/protocol.py
 
 tests/test_server.py
   ├── dhcp/protocol.py
@@ -27,7 +29,10 @@ tests/test_server.py
 | [dhcp/protocol.py](../dhcp/protocol.py) | BOOTP/DHCP constants, lease data type, DHCP option parsing/encoding, and MAC/reservation parsing. |
 | [dhcp/server.py](../dhcp/server.py) | Server configuration validation, DHCP message handling, reply construction, routing replies, and UDP socket loop. |
 | [dhcp/leases.py](../dhcp/leases.py) | Address allocation, static reservation ownership, lease renew/release, DECLINE quarantine, expiry, and JSON persistence. |
+| [dhcp/siem.py](../dhcp/siem.py) | Dashboard-serving HTTP server, JSON API, JSON-lines audit log, lease administration, and persisted scheduled rules. |
+| [dhcp/dashboard.html](../dhcp/dashboard.html) | Browser dashboard for lease search/actions, event logs, and SIEM rules. |
 | [tests/test_server.py](../tests/test_server.py) | Synthetic DHCP packets and unit tests for server and lease behavior. |
+| [tests/test_siem.py](../tests/test_siem.py) | HTTP lease-management and SIEM rule tests. |
 
 ## Startup flow
 
@@ -41,8 +46,8 @@ tests/test_server.py
    creates a `LeaseManager`.
 5. `LeaseManager` loads saved lease and quarantine state from the configured
    JSON file, if the file exists.
-6. `main()` calls `DHCPServer.serve_forever()`, which binds the UDP socket and
-   dispatches each received packet to `DHCPServer.handle_packet()`.
+6. `main()` starts `SIEMService`, which binds the HTTP API and evaluates rules
+   periodically while `DHCPServer.serve_forever()` dispatches DHCP packets.
 
 ## DHCP packet flow
 
@@ -62,6 +67,8 @@ tests/test_server.py
    atomically updates the JSON state file.
 6. For a reply, `DHCPServer._response_destination()` selects the relay,
    client, or broadcast destination, and `handle_packet()` sends the response.
+7. Lease changes notify `SIEMService`, which appends JSON audit events and
+   evaluates configured rules against recent events and active pool usage.
 
 ## Function map
 
@@ -70,8 +77,8 @@ tests/test_server.py
 - The root `main.py` imports and calls `dhcp.cli.main()` for a stable launch command.
 - `parse_args()` in `dhcp/cli.py` defines and parses command-line options.
 - `main()` parses reservation strings, constructs `DHCPServer`, starts its
-  socket loop, and converts configuration/startup errors into command-line
-  errors.
+  HTTP SIEM service and UDP socket loop, and converts configuration/startup
+  errors into command-line errors.
 
 ### `dhcp/protocol.py`
 
@@ -111,6 +118,19 @@ tests/test_server.py
 - `release()` removes only the client's matching lease.
 - `decline()` removes a matching lease and quarantines the address.
 
+### `dhcp/siem.py` and `dhcp/dashboard.html`
+
+- `SIEMService.start_http()` serves the dashboard at `/` and the JSON API from
+  the standard-library threaded HTTP server.
+- The dashboard calls the JSON API to show pool/lease metrics, search leases
+  and audit events, and manage leases and detection rules.
+- Lease endpoints search, assign, renew, extend, and release active leases.
+- `JsonEventLog` appends and searches JSON-lines audit events.
+- Rule endpoints create, list, update, and delete persisted `event_rate` and
+  `pool_usage` rules; a background scheduler evaluates enabled rules.
+- The default rules report rapid lease allocations and high pool utilization
+  as searchable SIEM alerts. They detect but do not block clients.
+
 ## Tests and dependencies
 
 `tests/test_server.py` builds packets using the protocol constants and sends
@@ -119,6 +139,7 @@ exercises packet and lease behavior without binding to a real network
 interface. Run the suite from the repository root with `python -m unittest`.
 
 The import direction is one-way: `main.py` starts the CLI; `dhcp/cli.py` uses
-the protocol helpers and server; `dhcp/server.py` uses protocol utilities and
-lease management; `dhcp/leases.py` uses the protocol's `Lease` data class and
-MAC parser. `dhcp/protocol.py` does not import the server or lease manager.
+the protocol helpers and server, and starts `dhcp/siem.py`; `dhcp/siem.py`
+uses the server/lease manager, while `dhcp/server.py` uses protocol utilities
+and lease management. `dhcp/leases.py` uses the protocol's `Lease` data class
+and MAC parser. `dhcp/protocol.py` does not import the server or lease manager.
