@@ -177,6 +177,7 @@
       <button class="nav-link active" data-view="overview"><span class="nav-icon">◫</span><span class="nav-text">Overview</span></button>
       <button class="nav-link" data-view="leases"><span class="nav-icon">⌁</span><span class="nav-text">Leases</span></button>
       <button class="nav-link" data-view="events"><span class="nav-icon">≋</span><span class="nav-text">Event log</span></button>
+      <button class="nav-link" data-view="packets"><span class="nav-icon">⇄</span><span class="nav-text">DHCP packets</span></button>
       <div class="nav-label">Detection</div>
       <button class="nav-link" data-view="rules"><span class="nav-icon">◇</span><span class="nav-text">SIEM rules</span></button>
       <div class="aside-bottom"><span class="online-dot"></span>Services online<br><span id="sidebar-clock"></span></div>
@@ -222,6 +223,14 @@
           </div>
         </section>
 
+        <section id="view-packets" class="section">
+          <div class="page-head"><div><div class="eyebrow">NETWORK / PACKET TELEMETRY</div><h1>DHCP packet log</h1><div class="subtitle">Received and sent DHCP message metadata, stored separately from lease audit events.</div></div><button class="button" id="packets-refresh">↻ &nbsp;Refresh</button></div>
+          <div class="panel">
+            <div class="filterbar"><div><div class="panel-title">DHCP packets</div><div id="packet-count" class="panel-meta">Latest packets first</div></div><div class="toolbar"><input id="packet-since" class="input" type="datetime-local" aria-label="From time"><input id="packet-until" class="input" type="datetime-local" aria-label="Until time"><input id="packet-source" class="input" placeholder="Source IPv4"><input id="packet-destination" class="input" placeholder="Destination IPv4"><select id="packet-type" class="select"><option value="">All DHCP types</option><option>DHCPDISCOVER</option><option>DHCPOFFER</option><option>DHCPREQUEST</option><option>DHCPDECLINE</option><option>DHCPACK</option><option>DHCPNAK</option><option>DHCPRELEASE</option><option>MALFORMED</option><option>UNKNOWN</option></select><button class="button" id="packet-search-button">Search</button><button class="button" id="packet-clear">Clear</button></div></div>
+            <div class="table-wrap"><table><thead><tr><th>Time</th><th>Direction</th><th>DHCP type</th><th>Source address</th><th>Destination address</th></tr></thead><tbody id="packets-table"></tbody></table></div>
+          </div>
+        </section>
+
         <section id="view-rules" class="section">
           <div class="page-head"><div><div class="eyebrow">DETECTION / RESPONSE</div><h1>SIEM rules</h1><div class="subtitle">Configure scheduled rules for starvation and pool-exhaustion signals.</div></div><button class="button primary" id="open-rule">＋ &nbsp;Create rule</button></div>
           <div class="panel"><div class="panel-head"><div><div class="panel-title">Configured rules</div><div class="panel-meta">Evaluated on the configured SIEM interval</div></div><button class="button small" id="rules-refresh">↻ Refresh</button></div><div class="table-wrap"><table><thead><tr><th>Rule</th><th>Detection</th><th>Threshold</th><th>Status</th><th>Actions</th></tr></thead><tbody id="rules-table"></tbody></table></div></div>
@@ -255,7 +264,7 @@
     (() => {
       "use strict";
       const $ = (selector) => document.querySelector(selector);
-      const state = { leases: [], events: [], rules: [], view: "overview", busy: false };
+      const state = { leases: [], events: [], packets: [], rules: [], view: "overview", busy: false };
       const eventNames = {
         lease_allocated: "Lease allocated", lease_assigned: "Lease assigned",
         lease_renewed: "Lease renewed", lease_extended: "Lease extended",
@@ -397,6 +406,23 @@
           tbody.append(row);
         });
       }
+      function renderPackets(packets) {
+        $("#packet-count").textContent = `${packets.length} packets · newest first`;
+        const tbody = $("#packets-table");
+        if (!packets.length) { emptyRow(tbody, 5, "No matching DHCP packets."); return; }
+        tbody.replaceChildren();
+        packets.forEach((packet) => {
+          const row = document.createElement("tr");
+          row.append(
+            cell(dateText(packet.timestamp)),
+            cell(packet.direction),
+            cell(packet.packet_type, "mono"),
+            cell(packet.source_address, "mono"),
+            cell(packet.destination_address, "mono")
+          );
+          tbody.append(row);
+        });
+      }
       function renderRules(rules) {
         const tbody = $("#rules-table");
         if (!rules.length) { emptyRow(tbody, 5, "No SIEM rules configured."); return; }
@@ -429,14 +455,33 @@
         try { const result = await api(`/api/logs?${query}`); renderEvents((result.events || []).reverse()); }
         catch (error) { toast(error.message, true); }
       }
+      async function searchPackets() {
+        const query = new URLSearchParams({ limit: "1000" });
+        const since = $("#packet-since").value;
+        const until = $("#packet-until").value;
+        const source = $("#packet-source").value.trim();
+        const destination = $("#packet-destination").value.trim();
+        const packetType = $("#packet-type").value;
+        if (since) query.set("since", new Date(since).toISOString());
+        if (until) query.set("until", new Date(until).toISOString());
+        if (source) query.set("source", source);
+        if (destination) query.set("destination", destination);
+        if (packetType) query.set("type", packetType);
+        try {
+          const result = await api(`/api/packets?${query}`);
+          state.packets = (result.packets || []).slice().reverse();
+          renderPackets(state.packets);
+        } catch (error) { toast(error.message, true); }
+      }
       function navigate(view) {
         state.view = view;
         document.querySelectorAll(".section").forEach((section) => section.classList.toggle("active", section.id === `view-${view}`));
         document.querySelectorAll(".nav-link").forEach((link) => link.classList.toggle("active", link.dataset.view === view));
-        const title = ({ overview: "Overview", leases: "Leases", events: "Event log", rules: "SIEM rules" })[view];
+        const title = ({ overview: "Overview", leases: "Leases", events: "Event log", packets: "DHCP packets", rules: "SIEM rules" })[view];
         $("#crumb-title").textContent = title;
         if (view === "leases") searchLeases();
         if (view === "events") searchEvents();
+        if (view === "packets") searchPackets();
         if (view === "rules") refreshRules();
       }
       async function refreshRules() {
@@ -483,6 +528,16 @@
       $("#event-type").addEventListener("change", searchEvents);
       $("#event-clear").addEventListener("click", () => { $("#event-search").value = ""; $("#event-type").value = ""; searchEvents(); });
       $("#events-refresh").addEventListener("click", searchEvents);
+      $("#packet-search-button").addEventListener("click", searchPackets);
+      $("#packet-clear").addEventListener("click", () => {
+        $("#packet-since").value = "";
+        $("#packet-until").value = "";
+        $("#packet-source").value = "";
+        $("#packet-destination").value = "";
+        $("#packet-type").value = "";
+        searchPackets();
+      });
+      $("#packets-refresh").addEventListener("click", searchPackets);
       $("#rules-refresh").addEventListener("click", refreshRules);
       document.querySelectorAll("[data-refresh]").forEach((button) => button.addEventListener("click", refresh));
       document.querySelectorAll("[data-navigate]").forEach((button) => button.addEventListener("click", () => navigate(button.dataset.navigate)));

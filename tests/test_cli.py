@@ -25,6 +25,7 @@ class CommandLineTests(unittest.TestCase):
             args = parse_args()
 
         self.assertEqual(args.http_bind_address, "0.0.0.0")
+        self.assertEqual(args.dhcp_packet_log_file, "dhcp_packets.jsonl")
 
     def test_http_bind_address_is_independent_from_dhcp_bind_address(self):
         with patch.object(
@@ -44,12 +45,15 @@ class CommandLineTests(unittest.TestCase):
                 "192.0.2.1",
                 "--http-bind-address",
                 "10.0.0.5",
+                "--dhcp-packet-log-file",
+                "/var/log/dhcp/packets.jsonl",
             ],
         ):
             args = parse_args()
 
         self.assertEqual(args.bind_address, "192.0.2.1")
         self.assertEqual(args.http_bind_address, "10.0.0.5")
+        self.assertEqual(args.dhcp_packet_log_file, "/var/log/dhcp/packets.jsonl")
 
 
 if __name__ == "__main__":

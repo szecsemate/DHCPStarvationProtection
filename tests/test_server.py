@@ -228,6 +228,34 @@ class DHCPServerTests(unittest.TestCase):
         _, destination = self.socket.sent.pop()
         self.assertEqual(destination, ("192.0.2.254", 67))
 
+    def test_packet_callback_records_received_and_sent_addresses_and_types(self):
+        packets = []
+        self.server.packet_callback = lambda **packet: packets.append(packet)
+        self.server.handle_packet(
+            client_packet(1, CLIENT_ONE),
+            self.socket,
+            ("198.51.100.25", 68),
+            ("192.0.2.1", 67),
+        )
+
+        self.assertEqual(
+            packets,
+            [
+                {
+                    "direction": "received",
+                    "packet_type": "DHCPDISCOVER",
+                    "source_address": "198.51.100.25",
+                    "destination_address": "192.0.2.1",
+                },
+                {
+                    "direction": "sent",
+                    "packet_type": "DHCPOFFER",
+                    "source_address": "192.0.2.1",
+                    "destination_address": "255.255.255.255",
+                },
+            ],
+        )
+
     def test_concurrent_allocations_are_unique(self):
         clients = [index.to_bytes(6, "big") for index in range(1, 20)]
         barrier = threading.Barrier(len(clients))

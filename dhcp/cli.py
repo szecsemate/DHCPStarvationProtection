@@ -47,7 +47,12 @@ def parse_args():
     parser.add_argument(
         "--siem-log-file",
         default="siem_events.jsonl",
-        help="JSON-lines SIEM audit log file",
+        help="JSON-lines lease/SIEM audit log file",
+    )
+    parser.add_argument(
+        "--dhcp-packet-log-file",
+        default="dhcp_packets.jsonl",
+        help="Separate JSON-lines log file for received and sent DHCP packets",
     )
     parser.add_argument(
         "--siem-rules-file",
@@ -90,6 +95,7 @@ def main():
             log_file=args.siem_log_file,
             rules_file=args.siem_rules_file,
             evaluation_interval=args.siem_interval,
+            packet_log_file=args.dhcp_packet_log_file,
         )
         try:
             siem.start_http(args.http_bind_address, args.http_port)

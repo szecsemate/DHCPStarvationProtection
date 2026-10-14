@@ -11,15 +11,16 @@ import uuid
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Union
 from urllib.parse import parse_qs, unquote, urlparse
 
-from .protocol import parse_mac
+from .protocol import DHCP_MESSAGE_TYPES, parse_mac
 
 LOG = logging.getLogger("dhcp-siem")
 
 
 class EventLogError(ValueError):
-    """The JSON-lines audit log contains an invalid record."""
+    """A JSON-lines log contains an invalid record."""
 
 
 EVENT_TYPES = {
@@ -56,6 +57,20 @@ def _timestamp():
     return datetime.now(timezone.utc).isoformat()
 
 
+def _parse_timestamp(value, name):
+    if not isinstance(value, str):
+        raise ValueError("{} must be an ISO-8601 timestamp".format(name))
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as error:
+        raise ValueError("{} must be an ISO-8601 timestamp".format(name)) from error
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 class JsonEventLog:
     """Append-only JSON-lines audit log with in-process synchronization."""
 
@@ -75,6 +90,16 @@ class JsonEventLog:
 
     def search(self, filters):
         records = []
+        since = (
+            _parse_timestamp(filters["since"], "since")
+            if filters.get("since")
+            else None
+        )
+        until = (
+            _parse_timestamp(filters["until"], "until")
+            if filters.get("until")
+            else None
+        )
         with self.lock:
             if not self.path.exists():
                 return records
@@ -84,11 +109,11 @@ class JsonEventLog:
                         record = json.loads(line)
                     except json.JSONDecodeError as error:
                         raise EventLogError(
-                            "invalid JSON event at line {}".format(line_number)
+                            "invalid JSON log record at line {}".format(line_number)
                         ) from error
                     if not isinstance(record, dict):
                         raise EventLogError(
-                            "invalid event record at line {}".format(line_number)
+                            "invalid log record at line {}".format(line_number)
                         )
                     if filters.get("event") and record.get("event") != filters["event"]:
                         continue
@@ -96,8 +121,34 @@ class JsonEventLog:
                         continue
                     if filters.get("address") and record.get("address") != filters["address"]:
                         continue
-                    if filters.get("since") and record.get("timestamp", "") < filters["since"]:
+                    if (
+                        filters.get("type")
+                        and record.get("packet_type") != filters["type"]
+                    ):
                         continue
+                    if (
+                        filters.get("source")
+                        and record.get("source_address") != filters["source"]
+                    ):
+                        continue
+                    if (
+                        filters.get("destination")
+                        and record.get("destination_address") != filters["destination"]
+                    ):
+                        continue
+                    if since or until:
+                        try:
+                            timestamp = _parse_timestamp(
+                                record.get("timestamp", ""), "log timestamp"
+                            )
+                        except ValueError as error:
+                            raise EventLogError(
+                                "invalid timestamp at line {}".format(line_number)
+                            ) from error
+                        if since and timestamp < since:
+                            continue
+                        if until and timestamp > until:
+                            continue
                     if filters.get("q") and filters["q"].lower() not in json.dumps(
                         record, sort_keys=True
                     ).lower():
@@ -112,14 +163,16 @@ class SIEMService:
     def __init__(
         self,
         dhcp_server,
-        log_file="siem_events.jsonl",
-        rules_file="siem_rules.json",
+        log_file: Union[str, os.PathLike] = "siem_events.jsonl",
+        rules_file: Union[str, os.PathLike] = "siem_rules.json",
         evaluation_interval=10,
+        packet_log_file: Union[str, os.PathLike] = "dhcp_packets.jsonl",
     ):
         if evaluation_interval < 1:
             raise ValueError("rule evaluation interval must be at least one second")
         self.dhcp_server = dhcp_server
         self.events = JsonEventLog(log_file)
+        self.packets = JsonEventLog(packet_log_file)
         self.rules_file = Path(rules_file)
         self.evaluation_interval = evaluation_interval
         self.lock = threading.RLock()
@@ -127,6 +180,7 @@ class SIEMService:
         self.rules = self._load_rules()
         self._last_triggered = {}
         self.dhcp_server.lease_manager.event_callback = self.record_event
+        self.dhcp_server.packet_callback = self.record_packet
         self.http_server = None
         self.scheduler = threading.Thread(
             target=self._schedule_rules, name="dhcp-siem-rules", daemon=True
@@ -135,6 +189,9 @@ class SIEMService:
 
     def record_event(self, event_type, **fields):
         return self.events.append(event_type, **fields)
+
+    def record_packet(self, **fields):
+        return self.packets.append("dhcp_packet", **fields)
 
     def _load_rules(self):
         if not self.rules_file.exists():
@@ -471,6 +528,36 @@ class SIEMService:
                     params["limit"] = limit
                     events = service.events.search(params)
                     self._send(200, {"events": events, "count": len(events)})
+                    return
+                if parts == ["api", "packets"] and self.command == "GET":
+                    for field in ("source", "destination"):
+                        if params.get(field):
+                            try:
+                                params[field] = str(ipaddress.IPv4Address(params[field]))
+                            except ipaddress.AddressValueError as error:
+                                raise ValueError(
+                                    "{} must be an IPv4 address".format(field)
+                                ) from error
+                    if params.get("type") and params["type"] not in (
+                        set(DHCP_MESSAGE_TYPES.values()) | {"MALFORMED", "UNKNOWN"}
+                    ):
+                        raise ValueError("unsupported DHCP packet type")
+                    if params.get("since"):
+                        params["since"] = _parse_timestamp(
+                            params["since"], "since"
+                        ).isoformat()
+                    if params.get("until"):
+                        params["until"] = _parse_timestamp(
+                            params["until"], "until"
+                        ).isoformat()
+                    if params.get("since") and params.get("until"):
+                        if _parse_timestamp(params["since"], "since") > _parse_timestamp(
+                            params["until"], "until"
+                        ):
+                            raise ValueError("since must not be later than until")
+                    params["limit"] = service._limit(params.get("limit"), 100)
+                    packets = service.packets.search(params)
+                    self._send(200, {"packets": packets, "count": len(packets)})
                     return
                 if parts == ["api", "rules"]:
                     if self.command == "GET":

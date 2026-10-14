@@ -12,6 +12,7 @@ from .protocol import (
     DHCP_ACK,
     DHCP_DECLINE,
     DHCP_DISCOVER,
+    DHCP_MESSAGE_TYPES,
     DHCP_NAK,
     DHCP_OFFER,
     DHCP_RELEASE,
@@ -89,6 +90,7 @@ class DHCPServer:
         self.lease_seconds = lease_seconds
         self.bind_address = bind_address
         self.port = port
+        self.packet_callback = None
         self.lease_manager = LeaseManager(
             network=self.network,
             server_ip=self.server_ip,
@@ -183,8 +185,41 @@ class DHCPServer:
             return str(BROADCAST_IP), 68
         return str(ciaddr), 68
 
-    def handle_packet(self, packet, sock):
+    def _log_packet(self, direction, packet_type, source_address, destination_address):
+        if self.packet_callback is not None:
+            self.packet_callback(
+                direction=direction,
+                packet_type=packet_type,
+                source_address=str(source_address[0]),
+                destination_address=str(destination_address[0]),
+            )
+
+    @staticmethod
+    def _packet_type(packet):
+        try:
+            message = parse_options(packet).get(53)
+        except ValueError:
+            return "MALFORMED"
+        if message is None or len(message) != 1:
+            return "UNKNOWN"
+        return DHCP_MESSAGE_TYPES.get(message[0], "UNKNOWN")
+
+    def handle_packet(
+        self,
+        packet,
+        sock,
+        source_address=("0.0.0.0", 0),
+        destination_address=None,
+    ):
         """Process one DHCP client packet and send a reply when appropriate."""
+        if destination_address is None or destination_address[0] == "0.0.0.0":
+            destination_address = (str(self.server_ip), self.port)
+        self._log_packet(
+            "received",
+            self._packet_type(packet),
+            source_address,
+            destination_address,
+        )
         if len(packet) < BOOTREQUEST.size:
             raise ValueError("packet is shorter than the BOOTP header")
         header = BOOTREQUEST.unpack(packet[: BOOTREQUEST.size])
@@ -274,7 +309,14 @@ class DHCPServer:
             else:
                 return
 
-        sock.sendto(response, self._response_destination(header, response_type))
+        response_destination = self._response_destination(header, response_type)
+        sock.sendto(response, response_destination)
+        self._log_packet(
+            "sent",
+            DHCP_MESSAGE_TYPES[response_type],
+            destination_address,
+            response_destination,
+        )
 
     def serve_forever(self):
         """Bind the UDP socket and process packets until interrupted or stopped."""
@@ -290,10 +332,15 @@ class DHCPServer:
                 self.pool_end,
             )
             while True:
-                packet, _ = sock.recvfrom(4096)
+                packet, source_address = sock.recvfrom(4096)
                 try:
-                    self.handle_packet(packet, sock)
+                    self.handle_packet(
+                        packet,
+                        sock,
+                        source_address,
+                        sock.getsockname(),
+                    )
                 except (ValueError, struct.error) as error:
                     LOG.warning("Ignoring malformed DHCP packet: %s", error)
                 except OSError:
-                    LOG.exception("Failed to persist DHCP state or send a reply")
+                    LOG.exception("DHCP packet handling, logging, or reply failed")

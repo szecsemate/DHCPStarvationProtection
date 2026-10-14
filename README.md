@@ -30,7 +30,7 @@ DHCPStarvationProtection/
 │   ├── leases.py          lease management and persistence
 │   ├── protocol.py        DHCP packet constants and helpers
 │   ├── server.py          DHCP message handling and UDP socket
-│   └── siem.py            HTTP lease API, JSON audit log, and scheduled rules
+│   └── siem.py            HTTP API, separate lease/packet logs, and SIEM rules
 ├── docs/
 │   └── MODULES.md         module and function connections
 ├── tests/
@@ -89,6 +89,7 @@ network capabilities. On Windows, use an elevated terminal when needed.
 | `--http-bind-address` | No | `0.0.0.0` | Dashboard HTTP IPv4 bind address; defaults to all interfaces |
 | `--http-port` | No | `8080` | Dashboard HTTP port |
 | `--siem-log-file` | No | `siem_events.jsonl` | JSON-lines audit log |
+| `--dhcp-packet-log-file` | No | `dhcp_packets.jsonl` | Separate JSON-lines log of received and sent DHCP packets |
 | `--siem-rules-file` | No | `siem_rules.json` | Persistent SIEM rules |
 | `--siem-interval` | No | `10` | Rule evaluation interval in seconds |
 
@@ -131,6 +132,8 @@ python3 -m unittest
   leases, and configuring persistent SIEM rules.
 - Logs lease allocations, assignments, renewals, extensions, releases,
   declines, expirations, and triggered alerts as JSON-lines events.
+- Records received and sent DHCP message types, timestamps, source addresses,
+  and destination addresses in a separate JSON-lines packet log.
 - Evaluates configurable event-rate and pool-usage rules on a timer. Default
   rules alert on 20 allocations in 60 seconds and at least 80% pool use.
 
@@ -140,8 +143,10 @@ Open `http://<http-interface-address>:8080/` in a browser while the server is
 running (for example, `http://10.0.0.5:8080/` for the example above). The
 dashboard provides an overview of active leases, pool utilization and alerts,
 searchable lease management (assign, renew, extend, release), searchable audit
-events, and SIEM rule creation, enable/disable, and deletion. It refreshes
-automatically every 10 seconds. The HTTP service has no authentication and
+events, a separate searchable DHCP packet log, and SIEM rule creation,
+enable/disable, and deletion. Packet search filters support a time range,
+source IPv4 address, destination IPv4 address, and DHCP message type. The
+dashboard refreshes automatically every 10 seconds. The HTTP service has no authentication and
 binds to all IPv4 interfaces by default. Restrict access with a firewall or
 bind it to a trusted interface/address; do not expose it to an untrusted
 network.
@@ -157,6 +162,7 @@ The site uses these JSON endpoints internally:
 | `POST /api/leases/<mac>/renew` | Renew the active lease for the configured lease duration. |
 | `POST /api/leases/<mac>/extend` with `{"seconds":3600}` | Extend its current expiry by the requested seconds. |
 | `GET /api/logs?event=<type>&client=<mac>&address=<ip>&since=<ISO-8601>&q=<term>&limit=<n>` | Search JSON audit events. |
+| `GET /api/packets?since=<ISO-8601>&until=<ISO-8601>&source=<ip>&destination=<ip>&type=<DHCP-type>&limit=<n>` | Search the separate DHCP packet log by inclusive time bounds, source/destination IPv4 address, and packet type. |
 | `GET /api/rules` | List rules. |
 | `POST /api/rules` | Create a rule. |
 | `PATCH /api/rules/<id>` | Update a rule. |
@@ -183,8 +189,9 @@ and `enabled`. For example, create an allocation-burst rule with:
 
 The built-in starvation-oriented rules detect rapid allocations to many
 clients and high address-pool utilization. Triggered rules append `siem_alert`
-events to the same searchable JSON-lines log. Rule state is stored separately
-from DHCP lease state; back up both JSON files.
+events to the searchable lease/SIEM JSON-lines log. Rule state is stored
+separately from DHCP lease state; back up the lease file, SIEM rules, lease/SIEM
+event log, and DHCP packet log.
 
 ## Limitations
 
@@ -192,9 +199,9 @@ from DHCP lease state; back up both JSON files.
   and it does not support DHCPv6.
 - It does not enforce per-client request rate limits or quotas. SIEM alerts
   are detection-only and do not block clients or mitigate starvation.
-- The HTTP dashboard and management endpoints have no authentication or authorization. Its default
-  loopback-only binding is intentional; use an authenticated reverse proxy and
-  firewall if remote access is required.
+- The HTTP dashboard and management endpoints have no authentication or
+  authorization. The listener binds to all IPv4 interfaces by default; restrict
+  access with a firewall or bind to a trusted address.
 - Lease updates are synchronized among threads in one process, but separate
   server processes must not share the same lease file.
 - The JSON file is not a replicated database or a backup strategy. Keep it

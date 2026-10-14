@@ -3,7 +3,7 @@ import tempfile
 import time
 import unittest
 import urllib.error
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 import urllib.request
 from pathlib import Path
 
@@ -32,6 +32,7 @@ class SIEMServiceTests(unittest.TestCase):
             log_file=root / "events.jsonl",
             rules_file=root / "rules.json",
             evaluation_interval=60,
+            packet_log_file=root / "packets.jsonl",
         )
         host, port = self.siem.start_http("0.0.0.0", 0)
         self.assertNotEqual(host, self.server.bind_address)
@@ -85,8 +86,10 @@ class SIEMServiceTests(unittest.TestCase):
             self.assertIn("text/html", response.headers["Content-Type"])
             dashboard = response.read().decode("utf-8")
         self.assertIn("Lease management", dashboard)
+        self.assertIn("DHCP packet log", dashboard)
         self.assertIn("SIEM rules", dashboard)
         self.assertIn("/api/stats", dashboard)
+        self.assertIn("/api/packets", dashboard)
 
         status, stats = self.request("GET", "/api/stats")
         self.assertEqual(status, 200)
@@ -147,6 +150,52 @@ class SIEMServiceTests(unittest.TestCase):
         self.assertIsNone(self.siem.lease_for(client))
         events = self.siem.events.search({"event": "lease_expired"})
         self.assertEqual(events[0]["client"], CLIENT_ONE)
+
+    def test_dhcp_packet_log_is_separate_and_searchable(self):
+        packet = self.siem.record_packet(
+            direction="received",
+            packet_type="DHCPDISCOVER",
+            source_address="198.51.100.25",
+            destination_address="192.0.2.1",
+        )
+        self.siem.record_packet(
+            direction="sent",
+            packet_type="DHCPOFFER",
+            source_address="192.0.2.1",
+            destination_address="255.255.255.255",
+        )
+
+        query = urlencode(
+            {
+                "since": packet["timestamp"],
+                "until": packet["timestamp"],
+                "source": "198.51.100.25",
+                "destination": "192.0.2.1",
+                "type": "DHCPDISCOVER",
+            }
+        )
+        status, result = self.request("GET", "/api/packets?" + query)
+        self.assertEqual(status, 200)
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["packets"][0]["packet_type"], "DHCPDISCOVER")
+        self.assertEqual(result["packets"][0]["direction"], "received")
+        self.assertTrue(self.siem.packets.path.exists())
+        self.assertEqual(self.siem.events.search({"event": "dhcp_packet"}), [])
+
+    def test_packet_search_rejects_invalid_address_and_type(self):
+        for query in (
+            "source=not-an-ip",
+            "type=BOGUS",
+            "since=not-a-timestamp",
+            "since=2025-01-02T00%3A00%3A00Z&until=2025-01-01T00%3A00%3A00Z",
+        ):
+            request = urllib.request.Request(
+                self.base_url + "/api/packets?" + query,
+                method="GET",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                urllib.request.urlopen(request)
+            self.assertEqual(error.exception.code, 400)
 
 
 if __name__ == "__main__":

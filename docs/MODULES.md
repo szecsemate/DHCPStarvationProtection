@@ -122,10 +122,15 @@ tests/test_server.py
 
 - `SIEMService.start_http()` serves the dashboard at `/` and the JSON API from
   the standard-library threaded HTTP server.
+- `DHCPServer` reports each received packet and successfully sent reply to the
+  SIEM service, which writes them to its separate DHCP packet JSON-lines log.
+- `GET /api/packets` filters packet records by time range, source/destination
+  IPv4 address, and DHCP message type.
 - The dashboard calls the JSON API to show pool/lease metrics, search leases
   and audit events, and manage leases and detection rules.
 - Lease endpoints search, assign, renew, extend, and release active leases.
-- `JsonEventLog` appends and searches JSON-lines audit events.
+- `JsonEventLog` appends and searches the independent lease/SIEM audit and DHCP
+  packet JSON-lines logs.
 - Rule endpoints create, list, update, and delete persisted `event_rate` and
   `pool_usage` rules; a background scheduler evaluates enabled rules.
 - The default rules report rapid lease allocations and high pool utilization
