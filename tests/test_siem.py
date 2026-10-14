@@ -6,6 +6,7 @@ import urllib.error
 from urllib.parse import quote, urlencode
 import urllib.request
 from pathlib import Path
+from unittest.mock import Mock
 
 from dhcp.server import DHCPServer
 from dhcp.siem import SIEMService
@@ -27,6 +28,8 @@ class SIEMServiceTests(unittest.TestCase):
             bind_address="192.0.2.1",
             lease_file=root / "leases.json",
         )
+        self.server._socket = Mock()
+        self.server._socket.sendto.side_effect = lambda packet, destination: len(packet)
         self.siem = SIEMService(
             self.server,
             log_file=root / "events.jsonl",
@@ -74,6 +77,11 @@ class SIEMServiceTests(unittest.TestCase):
         self.assertEqual(result["lease"]["address"], "192.0.2.11")
         self.request("DELETE", "/api/leases/{}".format(CLIENT_TWO))
         self.assertEqual(self.siem.list_leases({"client": CLIENT_TWO}), [])
+        self.assertEqual(self.server._socket.sendto.call_count, 3)
+        self.assertEqual(
+            len(self.siem.packets.search({"mac": CLIENT_TWO})),
+            1,
+        )
 
         _, result = self.request("GET", "/api/logs?client=" + CLIENT_ONE)
         self.assertEqual(
@@ -87,6 +95,8 @@ class SIEMServiceTests(unittest.TestCase):
             dashboard = response.read().decode("utf-8")
         self.assertIn("Lease management", dashboard)
         self.assertIn("DHCP packet log", dashboard)
+        self.assertIn("Client MAC", dashboard)
+        self.assertIn("DHCPFORCERENEW", dashboard)
         self.assertIn("SIEM rules", dashboard)
         self.assertIn("/api/stats", dashboard)
         self.assertIn("/api/packets", dashboard)
@@ -157,12 +167,14 @@ class SIEMServiceTests(unittest.TestCase):
             packet_type="DHCPDISCOVER",
             source_address="198.51.100.25",
             destination_address="192.0.2.1",
+            client_mac=CLIENT_ONE,
         )
         self.siem.record_packet(
             direction="sent",
             packet_type="DHCPOFFER",
             source_address="192.0.2.1",
             destination_address="255.255.255.255",
+            client_mac=CLIENT_TWO,
         )
 
         query = urlencode(
@@ -172,6 +184,7 @@ class SIEMServiceTests(unittest.TestCase):
                 "source": "198.51.100.25",
                 "destination": "192.0.2.1",
                 "type": "DHCPDISCOVER",
+                "mac": CLIENT_ONE.upper(),
             }
         )
         status, result = self.request("GET", "/api/packets?" + query)
@@ -179,6 +192,7 @@ class SIEMServiceTests(unittest.TestCase):
         self.assertEqual(result["count"], 1)
         self.assertEqual(result["packets"][0]["packet_type"], "DHCPDISCOVER")
         self.assertEqual(result["packets"][0]["direction"], "received")
+        self.assertEqual(result["packets"][0]["client_mac"], CLIENT_ONE)
         self.assertTrue(self.siem.packets.path.exists())
         self.assertEqual(self.siem.events.search({"event": "dhcp_packet"}), [])
 

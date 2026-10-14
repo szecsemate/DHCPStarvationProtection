@@ -151,7 +151,22 @@ completed the exchange.
   quarantine deadline.
 - RELEASE removes only that client's lease, and only if `ciaddr` agrees when
   it is present.
-- These two message types do not receive a DHCP reply in this implementation.
+- A client-originated RELEASE has no DHCP reply.
+- The dashboard/API release operation is administrative: it removes the lease,
+  quarantines the address until its former expiry to avoid reuse while a client
+  may still be using it, then sends DHCPFORCERENEW. The resulting client
+  DHCPREQUEST is NAKed because the lease has been revoked.
+
+### Administrative lease changes
+
+Dashboard/API renew and extend operations update server state and send a
+unicast DHCPFORCERENEW to the client's current IPv4 address on UDP port 68.
+When the client requests renewal, the server ACK includes the configured lease
+duration, or the client's extended duration when one is set. DHCPFORCERENEW is an advisory protocol mechanism: clients must support and
+accept it, and an unresponsive client may continue using its old address until
+its original lease expires. This implementation does not add DHCP message
+authentication, so use it only on a trusted client network. The server logs
+its send attempt, not client receipt.
 
 Other message types are ignored. The implementation is IPv4-only and does not
 implement the full set of DHCP options or all protocol edge cases.
@@ -218,7 +233,9 @@ Each persisted expiry is wall-clock time. On load, remaining duration is
 computed from wall time and converted to a monotonic deadline for runtime
 comparisons. Expired entries are skipped. Invalid file structure/entries
 raise errors; duplicate or currently invalid leases are ignored with
-warnings.
+warnings. Per-client lease duration is also stored when an administrative
+extension overrides the configured default; older records without that field
+continue using the configured duration.
 
 Persistence writes a temporary file beside the target, serializes JSON,
 flushes and `fsync`s it, then uses `os.replace()` for atomic replacement.
@@ -241,15 +258,15 @@ client/address, while alerts include rule information and details.
 ### Packet metadata
 
 The packet log records metadata, not raw packet bytes: timestamp, `event`
-(`dhcp_packet`), direction, packet type, source IPv4, and destination IPv4.
-`handle_packet()` logs a receive before full semantic processing, so malformed
-datagrams can appear as `MALFORMED` or `UNKNOWN`. Sent entries are written only
-after `sendto()` returns successfully. The current record does not contain
-payload/options, client MAC, UDP ports, interface index, or a kernel-level
-delivery confirmation. For outgoing entries, `source_address` is based on the
-socket's local endpoint returned by `getsockname()`; with a wildcard bind, it
-can therefore be `0.0.0.0` rather than the interface address selected by the
-kernel for the datagram.
+(`dhcp_packet`), direction, packet type, client MAC when an Ethernet BOOTP
+header is available, source IPv4, and destination IPv4. `handle_packet()` logs
+a receive before full semantic processing, so malformed datagrams can appear
+as `MALFORMED` or `UNKNOWN`. Sent entries are written only after `sendto()`
+returns successfully. The record does not contain payload/options, UDP ports,
+interface index, or a kernel-level delivery confirmation. For outgoing
+entries, `source_address` is based on the socket's local endpoint returned by
+`getsockname()`; with a wildcard bind, it can therefore be `0.0.0.0` rather
+than the interface address selected by the kernel for the datagram.
 
 ### SIEM rule processing
 
@@ -280,18 +297,19 @@ handles JSON routes. The dashboard is a static client and uses same-origin
 | `GET /api/leases` | Search active leases by client, address, or free-text query. |
 | `GET /api/leases/<mac>` | Read one lease. |
 | `PUT /api/leases/<mac>` | Assign/renew an address from a JSON body. |
-| `POST /api/leases/<mac>/renew` | Renew the current lease. |
-| `POST /api/leases/<mac>/extend` | Extend expiry by a positive number of seconds. |
-| `DELETE /api/leases/<mac>` | Release a lease. |
+| `POST /api/leases/<mac>/renew` | Renew the current lease and prompt the client to renew. |
+| `POST /api/leases/<mac>/extend` | Extend expiry and prompt the client to renew. |
+| `DELETE /api/leases/<mac>` | Revoke a lease, protect its address until old expiry, and prompt the client to renew. |
 | `GET /api/logs` | Search lease/SIEM events. |
-| `GET /api/packets` | Search packet metadata by `since`, `until`, `source`, `destination`, `type`, and `limit`. |
+| `GET /api/packets` | Search packet metadata by `since`, `until`, `source`, `destination`, `mac`, `type`, and `limit`. |
 | `GET/POST /api/rules` | List or create detection rules. |
 | `PATCH/PUT/DELETE /api/rules/<id>` | Update or delete a rule. |
 
 Packet API time bounds are inclusive ISO-8601 timestamps; timezone-naive
 values are treated as UTC. Source and destination filters are exact IPv4
-matches, and packet type is validated against the supported DHCP names plus
-`MALFORMED` and `UNKNOWN`. Invalid request values return HTTP 400. Log results
+matches, MAC addresses are normalized six-byte Ethernet addresses, and packet
+type is validated against the supported DHCP names plus `MALFORMED` and
+`UNKNOWN`. Invalid request values return HTTP 400. Log results
 preserve append order, with a maximum number of matching records returned;
 the dashboard reverses them for newest-first display.
 

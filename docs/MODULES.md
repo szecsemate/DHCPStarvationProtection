@@ -77,7 +77,14 @@ tests/
    destination. `sendto()` sends the reply; successful sends are then recorded
    in the packet log.
 5. Lease operations emit lease/SIEM audit events through the callback wired by
-   `SIEMService`. Packet metadata is sent through a separate callback/log.
+   `SIEMService`. Packet metadata, including the client MAC when available, is
+   sent through a separate callback/log.
+
+Dashboard/API lease renewal and extension send DHCPFORCERENEW to prompt the
+client to renew. Administrative release revokes the server lease, holds its
+address until its former expiry to avoid immediate reuse, then prompts the
+client to renew; the server NAKs that client's renewal. Client support for
+DHCPFORCERENEW is required, so it is not a guaranteed immediate disconnect.
 
 `lease_allocated` means the server allocated/persisted state while handling
 DISCOVER; by itself it does not prove that an OFFER reached the client or that
@@ -92,7 +99,7 @@ the DHCP exchange completed.
   synchronization and `fsync`. The lease/SIEM log and packet log are separate
   instances/files.
 - `GET /api/packets` searches packet metadata by inclusive time bounds,
-  source/destination IPv4, and DHCP type. Other API routes expose leases,
+  source/destination IPv4, client MAC, and DHCP type. Other API routes expose leases,
   lease/SIEM events, stats, and rule management.
 - The SIEM scheduler evaluates event-rate and pool-usage rules, appending
   alerts to the lease/SIEM event log. It does not block or rate-limit clients.

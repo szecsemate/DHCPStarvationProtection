@@ -96,6 +96,7 @@ class LeaseManager:
                     "client": client.hex(),
                     "address": str(lease.address),
                     "expires_at": now_wall + lease.expires_at - now_mono,
+                    "lease_seconds": lease.lease_seconds,
                 }
                 for client, lease in self.leases.items()
             ],
@@ -167,7 +168,14 @@ class LeaseManager:
                 continue
             # Persist wall-clock timestamps, but use monotonic time while running
             # to avoid lease behavior changing when the system clock is adjusted.
-            loaded[client] = Lease(address, now_mono + remaining)
+            lease_seconds = item.get("lease_seconds")
+            if lease_seconds is not None and (
+                isinstance(lease_seconds, bool)
+                or not isinstance(lease_seconds, int)
+                or not 1 <= lease_seconds <= 0xFFFFFFFF
+            ):
+                raise ValueError("invalid lease duration in DHCP lease file")
+            loaded[client] = Lease(address, now_mono + remaining, lease_seconds)
             used_addresses.add(address)
 
         quarantined = {}
@@ -256,7 +264,9 @@ class LeaseManager:
                         break
             if address is None:
                 return None
-            self.leases[client] = Lease(address, time.monotonic() + self.lease_seconds)
+            self.leases[client] = Lease(
+                address, time.monotonic() + self.lease_seconds
+            )
             self._persist_state()
             self._record_event(
                 "lease_allocated", client=client.hex(":"), address=str(address)
@@ -275,7 +285,14 @@ class LeaseManager:
             ):
                 return False
             previous = self.leases.get(client)
-            self.leases[client] = Lease(address, time.monotonic() + self.lease_seconds)
+            lease_seconds = (
+                previous.lease_seconds
+                if previous is not None and previous.lease_seconds is not None
+                else self.lease_seconds
+            )
+            self.leases[client] = Lease(
+                address, time.monotonic() + lease_seconds, lease_seconds
+            )
             self._persist_state()
             self._record_event(
                 "lease_renewed" if previous is not None else "lease_assigned",
@@ -294,6 +311,11 @@ class LeaseManager:
             if lease is None:
                 return False
             lease.expires_at += seconds
+            remaining = math.ceil(lease.expires_at - time.monotonic())
+            if remaining > 0xFFFFFFFF:
+                lease.expires_at -= seconds
+                raise ValueError("extended lease exceeds the maximum DHCP lease time")
+            lease.lease_seconds = remaining
             self._persist_state()
             self._record_event(
                 "lease_extended",
@@ -303,13 +325,15 @@ class LeaseManager:
             )
             return True
 
-    def release(self, client, address=None):
+    def release(self, client, address=None, quarantine_until_expiry=False):
         """Release a client's lease if the address agrees with its current lease."""
         with self.lock:
             current = self.leases.get(client)
             if current is None or (address is not None and address != current.address):
                 return False
             self.leases.pop(client)
+            if quarantine_until_expiry and current.expires_at > time.monotonic():
+                self.quarantined[current.address] = current.expires_at
             self._persist_state()
             self._record_event(
                 "lease_released", client=client.hex(":"), address=str(current.address)

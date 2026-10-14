@@ -226,8 +226,8 @@
         <section id="view-packets" class="section">
           <div class="page-head"><div><div class="eyebrow">NETWORK / PACKET TELEMETRY</div><h1>DHCP packet log</h1><div class="subtitle">Received and sent DHCP message metadata, stored separately from lease audit events.</div></div><button class="button" id="packets-refresh">↻ &nbsp;Refresh</button></div>
           <div class="panel">
-            <div class="filterbar"><div><div class="panel-title">DHCP packets</div><div id="packet-count" class="panel-meta">Latest packets first</div></div><div class="toolbar"><input id="packet-since" class="input" type="datetime-local" aria-label="From time"><input id="packet-until" class="input" type="datetime-local" aria-label="Until time"><input id="packet-source" class="input" placeholder="Source IPv4"><input id="packet-destination" class="input" placeholder="Destination IPv4"><select id="packet-type" class="select"><option value="">All DHCP types</option><option>DHCPDISCOVER</option><option>DHCPOFFER</option><option>DHCPREQUEST</option><option>DHCPDECLINE</option><option>DHCPACK</option><option>DHCPNAK</option><option>DHCPRELEASE</option><option>MALFORMED</option><option>UNKNOWN</option></select><button class="button" id="packet-search-button">Search</button><button class="button" id="packet-clear">Clear</button></div></div>
-            <div class="table-wrap"><table><thead><tr><th>Time</th><th>Direction</th><th>DHCP type</th><th>Source address</th><th>Destination address</th></tr></thead><tbody id="packets-table"></tbody></table></div>
+            <div class="filterbar"><div><div class="panel-title">DHCP packets</div><div id="packet-count" class="panel-meta">Latest packets first</div></div><div class="toolbar"><input id="packet-since" class="input" type="datetime-local" aria-label="From time"><input id="packet-until" class="input" type="datetime-local" aria-label="Until time"><input id="packet-source" class="input" placeholder="Source IPv4"><input id="packet-destination" class="input" placeholder="Destination IPv4"><input id="packet-mac" class="input" placeholder="Client MAC"><select id="packet-type" class="select"><option value="">All DHCP types</option><option>DHCPDISCOVER</option><option>DHCPOFFER</option><option>DHCPREQUEST</option><option>DHCPDECLINE</option><option>DHCPACK</option><option>DHCPNAK</option><option>DHCPRELEASE</option><option>DHCPFORCERENEW</option><option>MALFORMED</option><option>UNKNOWN</option></select><button class="button" id="packet-search-button">Search</button><button class="button" id="packet-clear">Clear</button></div></div>
+            <div class="table-wrap"><table><thead><tr><th>Time</th><th>Direction</th><th>DHCP type</th><th>Client MAC</th><th>Source address</th><th>Destination address</th></tr></thead><tbody id="packets-table"></tbody></table></div>
           </div>
         </section>
 
@@ -409,7 +409,7 @@
       function renderPackets(packets) {
         $("#packet-count").textContent = `${packets.length} packets · newest first`;
         const tbody = $("#packets-table");
-        if (!packets.length) { emptyRow(tbody, 5, "No matching DHCP packets."); return; }
+        if (!packets.length) { emptyRow(tbody, 6, "No matching DHCP packets."); return; }
         tbody.replaceChildren();
         packets.forEach((packet) => {
           const row = document.createElement("tr");
@@ -417,6 +417,7 @@
             cell(dateText(packet.timestamp)),
             cell(packet.direction),
             cell(packet.packet_type, "mono"),
+            cell(packet.client_mac || "—", "mono"),
             cell(packet.source_address, "mono"),
             cell(packet.destination_address, "mono")
           );
@@ -461,11 +462,13 @@
         const until = $("#packet-until").value;
         const source = $("#packet-source").value.trim();
         const destination = $("#packet-destination").value.trim();
+        const mac = $("#packet-mac").value.trim();
         const packetType = $("#packet-type").value;
         if (since) query.set("since", new Date(since).toISOString());
         if (until) query.set("until", new Date(until).toISOString());
         if (source) query.set("source", source);
         if (destination) query.set("destination", destination);
+        if (mac) query.set("mac", mac);
         if (packetType) query.set("type", packetType);
         try {
           const result = await api(`/api/packets?${query}`);
@@ -534,6 +537,7 @@
         $("#packet-until").value = "";
         $("#packet-source").value = "";
         $("#packet-destination").value = "";
+        $("#packet-mac").value = "";
         $("#packet-type").value = "";
         searchPackets();
       });

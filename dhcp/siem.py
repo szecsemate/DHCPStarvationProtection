@@ -127,6 +127,12 @@ class JsonEventLog:
                     ):
                         continue
                     if (
+                        filters.get("mac")
+                        and (record.get("client_mac") or "").lower()
+                        != filters["mac"]
+                    ):
+                        continue
+                    if (
                         filters.get("source")
                         and record.get("source_address") != filters["source"]
                     ):
@@ -337,6 +343,7 @@ class SIEMService:
             address = lease.address
         if not manager.assign(client, address):
             raise ValueError("lease could not be renewed")
+        self.dhcp_server.send_forcerenew(client, address)
         return self.lease_for(client)
 
     def extend(self, client, body):
@@ -346,6 +353,10 @@ class SIEMService:
         manager = self.dhcp_server.lease_manager
         if not manager.extend(client, seconds):
             raise KeyError("lease not found")
+        with manager.lock:
+            lease = manager.leases[client]
+            address = lease.address
+        self.dhcp_server.send_forcerenew(client, address)
         return self.lease_for(client)
 
     def rules_snapshot(self):
@@ -542,6 +553,11 @@ class SIEMService:
                         set(DHCP_MESSAGE_TYPES.values()) | {"MALFORMED", "UNKNOWN"}
                     ):
                         raise ValueError("unsupported DHCP packet type")
+                    if params.get("mac"):
+                        try:
+                            params["mac"] = parse_mac(params["mac"]).hex(":")
+                        except ValueError as error:
+                            raise ValueError("mac must be a valid six-byte MAC address") from error
                     if params.get("since"):
                         params["since"] = _parse_timestamp(
                             params["since"], "since"
@@ -576,9 +592,17 @@ class SIEMService:
                         self._send(200, {"lease": lease})
                     elif self.command == "DELETE":
                         manager = service.dhcp_server.lease_manager
-                        manager.expire()
-                        if not manager.release(client):
-                            raise KeyError("lease not found")
+                        with manager.lock:
+                            manager.expire()
+                            lease = manager.leases.get(client)
+                            if lease is None:
+                                raise KeyError("lease not found")
+                            address = lease.address
+                            if not manager.release(
+                                client, quarantine_until_expiry=True
+                            ):
+                                raise KeyError("lease not found")
+                        service.dhcp_server.send_forcerenew(client, address)
                         self._send(200, {"released": True})
                     elif self.command == "PUT":
                         self._send(200, {"lease": service.assign(parts[2], self._body())})

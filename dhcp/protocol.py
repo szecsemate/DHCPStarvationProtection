@@ -17,6 +17,7 @@ DHCP_DECLINE = 4
 DHCP_ACK = 5
 DHCP_NAK = 6
 DHCP_RELEASE = 7
+DHCP_FORCERENEW = 9
 DHCP_MESSAGE_TYPES = {
     DHCP_DISCOVER: "DHCPDISCOVER",
     DHCP_OFFER: "DHCPOFFER",
@@ -25,6 +26,7 @@ DHCP_MESSAGE_TYPES = {
     DHCP_ACK: "DHCPACK",
     DHCP_NAK: "DHCPNAK",
     DHCP_RELEASE: "DHCPRELEASE",
+    DHCP_FORCERENEW: "DHCPFORCERENEW",
 }
 
 
@@ -34,6 +36,7 @@ class Lease:
 
     address: ipaddress.IPv4Address
     expires_at: float
+    lease_seconds: int = None
 
 
 def parse_options(packet):

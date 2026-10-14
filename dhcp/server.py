@@ -2,6 +2,7 @@
 
 import ipaddress
 import logging
+import secrets
 import socket
 import struct
 import threading
@@ -12,6 +13,7 @@ from .protocol import (
     DHCP_ACK,
     DHCP_DECLINE,
     DHCP_DISCOVER,
+    DHCP_FORCERENEW,
     DHCP_MESSAGE_TYPES,
     DHCP_NAK,
     DHCP_OFFER,
@@ -99,6 +101,8 @@ class DHCPServer:
             )
         self.interface = interface
         self.packet_callback = None
+        self._socket = None
+        self._socket_lock = threading.Lock()
         self.lease_manager = LeaseManager(
             network=self.network,
             server_ip=self.server_ip,
@@ -132,7 +136,7 @@ class DHCPServer:
         """Assign or renew an address through the lease manager."""
         return self.lease_manager.assign(client, address)
 
-    def build_reply(self, header, message_type, address=None):
+    def build_reply(self, header, message_type, address=None, lease_seconds=None):
         """Encode a BOOTP reply and the options advertised by this server."""
         _, htype, hlen, hops, xid, secs, flags, ciaddr, _, _, giaddr, chaddr, _, _ = header
         if message_type == DHCP_NAK:
@@ -158,7 +162,14 @@ class DHCPServer:
         options.extend(encode_option(53, bytes((message_type,))))
         options.extend(encode_option(54, self.server_ip.packed))
         if message_type in (DHCP_OFFER, DHCP_ACK):
-            options.extend(encode_option(51, struct.pack("!I", self.lease_seconds)))
+            options.extend(
+                encode_option(
+                    51,
+                    struct.pack(
+                        "!I", lease_seconds if lease_seconds is not None else self.lease_seconds
+                    ),
+                )
+            )
             options.extend(encode_option(1, self.network.netmask.packed))
             options.extend(encode_option(3, self.router.packed))
             options.extend(encode_option(28, self.network.broadcast_address.packed))
@@ -193,14 +204,71 @@ class DHCPServer:
             return str(BROADCAST_IP), 68
         return str(ciaddr), 68
 
-    def _log_packet(self, direction, packet_type, source_address, destination_address):
+    def _log_packet(
+        self,
+        direction,
+        packet_type,
+        source_address,
+        destination_address,
+        client_mac=None,
+    ):
         if self.packet_callback is not None:
             self.packet_callback(
                 direction=direction,
                 packet_type=packet_type,
                 source_address=str(source_address[0]),
                 destination_address=str(destination_address[0]),
+                client_mac=client_mac,
             )
+
+    def send_forcerenew(self, client, address):
+        """Ask a DHCP client to renew its lease using RFC 3203 DHCPFORCERENEW."""
+        if len(client) != 6:
+            raise ValueError("DHCPFORCERENEW requires a six-byte Ethernet MAC")
+        address = ipaddress.IPv4Address(address)
+        header = BOOTREQUEST.pack(
+            2,
+            1,
+            6,
+            0,
+            secrets.randbits(32),
+            0,
+            0,
+            address.packed,
+            ZERO_IP,
+            self.server_ip.packed,
+            ZERO_IP,
+            client.ljust(16, b"\0"),
+            b"\0" * 64,
+            b"\0" * 128,
+        )
+        response = (
+            header
+            + MAGIC_COOKIE
+            + encode_option(53, bytes((DHCP_FORCERENEW,)))
+            + encode_option(54, self.server_ip.packed)
+            + b"\xff"
+        )
+        destination = (str(address), 68)
+        with self._socket_lock:
+            sock = self._socket
+        if sock is None:
+            raise OSError("DHCP socket is not running; cannot notify the client")
+        LOG.info("Sending DHCPFORCERENEW to %s for %s", address, client.hex(":"))
+        sent_bytes = sock.sendto(response, destination)
+        LOG.info(
+            "Sent DHCPFORCERENEW (%d bytes) to %s:68 for %s",
+            sent_bytes,
+            address,
+            client.hex(":"),
+        )
+        self._log_packet(
+            "sent",
+            "DHCPFORCERENEW",
+            (str(self.server_ip), self.port),
+            destination,
+            client.hex(":"),
+        )
 
     @staticmethod
     def _packet_type(packet):
@@ -223,6 +291,11 @@ class DHCPServer:
         if destination_address is None or destination_address[0] == "0.0.0.0":
             destination_address = (str(self.server_ip), self.port)
         packet_type = self._packet_type(packet)
+        client_mac = None
+        if len(packet) >= BOOTREQUEST.size:
+            packet_header = BOOTREQUEST.unpack(packet[: BOOTREQUEST.size])
+            if packet_header[1] == 1 and packet_header[2] == 6:
+                client_mac = packet_header[11][:6].hex(":")
         LOG.info(
             "Received %s from %s:%d on %s:%d",
             packet_type,
@@ -236,6 +309,7 @@ class DHCPServer:
             packet_type,
             source_address,
             destination_address,
+            client_mac,
         )
         if len(packet) < BOOTREQUEST.size:
             raise ValueError("packet is shorter than the BOOTP header")
@@ -295,7 +369,15 @@ class DHCPServer:
 
                 if self.assign_address(client, address):
                     response_type = DHCP_ACK
-                    response = self.build_reply(header, response_type, address)
+                    lease = self.leases.get(client)
+                    lease_seconds = (
+                        lease.lease_seconds
+                        if lease is not None and lease.lease_seconds is not None
+                        else self.lease_seconds
+                    )
+                    response = self.build_reply(
+                        header, response_type, address, lease_seconds
+                    )
                 else:
                     response_type = DHCP_NAK
                     response = self.build_reply(header, response_type)
@@ -346,6 +428,7 @@ class DHCPServer:
             DHCP_MESSAGE_TYPES[response_type],
             destination_address,
             response_destination,
+            client.hex(":"),
         )
 
     def serve_forever(self):
@@ -375,6 +458,8 @@ class DHCPServer:
                 self.pool_start,
                 self.pool_end,
             )
+            with self._socket_lock:
+                self._socket = sock
             try:
                 while True:
                     packet, source_address = sock.recvfrom(4096)
@@ -391,3 +476,6 @@ class DHCPServer:
                         LOG.exception("DHCP packet handling, logging, or reply failed")
             except KeyboardInterrupt:
                 LOG.info("DHCP server stopped")
+            finally:
+                with self._socket_lock:
+                    self._socket = None

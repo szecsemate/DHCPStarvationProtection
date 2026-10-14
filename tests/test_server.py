@@ -9,8 +9,10 @@ from unittest.mock import patch
 from dhcp.protocol import (
     BOOTREQUEST,
     DHCP_ACK,
+    DHCP_FORCERENEW,
     DHCP_NAK,
     DHCP_OFFER,
+    DHCP_REQUEST,
     DHCP_RELEASE,
     MAGIC_COOKIE,
     parse_options,
@@ -272,15 +274,76 @@ class DHCPServerTests(unittest.TestCase):
                     "packet_type": "DHCPDISCOVER",
                     "source_address": "198.51.100.25",
                     "destination_address": "192.0.2.1",
+                    "client_mac": "02:00:00:00:00:01",
                 },
                 {
                     "direction": "sent",
                     "packet_type": "DHCPOFFER",
                     "source_address": "192.0.2.1",
                     "destination_address": "255.255.255.255",
+                    "client_mac": "02:00:00:00:00:01",
                 },
             ],
         )
+
+    def test_forcerenew_is_unicast_and_logs_client_mac(self):
+        packets = []
+        self.server.packet_callback = lambda **packet: packets.append(packet)
+        fake_socket = FakeSocket()
+        self.server._socket = fake_socket
+
+        self.server.send_forcerenew(CLIENT_ONE, "192.0.2.10")
+
+        packet, destination = fake_socket.sent[0]
+        self.assertEqual(destination, ("192.0.2.10", 68))
+        self.assertEqual(BOOTREQUEST.unpack(packet[: BOOTREQUEST.size])[7], b"\xc0\x00\x02\x0a")
+        self.assertEqual(parse_options(packet)[53], bytes((DHCP_FORCERENEW,)))
+        self.assertEqual(packets[0]["packet_type"], "DHCPFORCERENEW")
+        self.assertEqual(packets[0]["client_mac"], "02:00:00:00:00:01")
+
+    def test_admin_release_quarantines_address_until_old_expiry(self):
+        address = self.server.allocate_address(CLIENT_ONE)
+        lease_expiry = self.server.leases[CLIENT_ONE].expires_at
+
+        self.assertTrue(
+            self.server.lease_manager.release(
+                CLIENT_ONE, quarantine_until_expiry=True
+            )
+        )
+
+        self.assertNotIn(CLIENT_ONE, self.server.leases)
+        self.assertEqual(self.server.quarantined[address], lease_expiry)
+
+        self.server.handle_packet(
+            client_packet(DHCP_REQUEST, CLIENT_ONE, ciaddr=str(address)),
+            self.socket,
+        )
+        response, _ = self.socket.sent[-1]
+        self.assertEqual(parse_options(response)[53], bytes((DHCP_NAK,)))
+
+        self.server.handle_packet(
+            client_packet(1, CLIENT_TWO),
+            self.socket,
+        )
+        offer, _ = self.socket.sent[-1]
+        offered_address = ipaddress.IPv4Address(
+            BOOTREQUEST.unpack(offer[: BOOTREQUEST.size])[8]
+        )
+        self.assertEqual(offered_address, ipaddress.IPv4Address("192.0.2.11"))
+
+    def test_renewal_after_lease_extension_advertises_extended_duration(self):
+        address = self.server.allocate_address(CLIENT_ONE)
+        self.server.lease_manager.extend(CLIENT_ONE, 300)
+
+        self.server.handle_packet(
+            client_packet(DHCP_REQUEST, CLIENT_ONE, ciaddr=str(address)),
+            self.socket,
+        )
+
+        response, _ = self.socket.sent[-1]
+        lease_seconds = int.from_bytes(parse_options(response)[51], "big")
+        self.assertEqual(lease_seconds, self.server.leases[CLIENT_ONE].lease_seconds)
+        self.assertGreater(lease_seconds, self.server.lease_seconds)
 
     def test_ctrl_c_during_receive_stops_server_without_traceback(self):
         with patch("dhcp.server.socket.socket", return_value=InterruptingSocket()):
