@@ -140,6 +140,11 @@
     .check-row { display: flex; gap: 8px; align-items: center; color: #a9b6c1; font-size: 12px; }
     .toast { position: fixed; right: 22px; bottom: 22px; z-index: 8; background: #1a2934; border: 1px solid #385164; border-radius: 8px; padding: 12px 16px; max-width: min(420px, calc(100vw - 44px)); font-size: 12px; box-shadow: 0 8px 30px #0007; }
     .toast.error { border-color: #8b4545; color: #ffaaaa; }
+    [hidden] { display: none !important; }
+    .login-screen { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 20px; background: #080d12; }
+    .login-card { width: min(420px, 100%); border: 1px solid var(--border); border-radius: 12px; background: var(--panel); box-shadow: 0 20px 80px #0009; }
+    .login-card form { padding: 22px; }
+    .login-error { min-height: 18px; color: var(--red); font-size: 12px; }
     @media (max-width: 900px) {
       .layout { grid-template-columns: 66px minmax(0, 1fr); }
       aside { padding: 20px 8px; align-items: center; }
@@ -167,7 +172,18 @@
   </style>
 </head>
 <body>
-  <div class="layout">
+  <div id="login-screen" class="login-screen">
+    <div class="login-card">
+      <div class="modal-head"><h2>Leasewatch sign in</h2></div>
+      <form id="login-form">
+        <div class="field"><label for="login-user">Username</label><input id="login-user" class="input" value="root" autocomplete="username" required></div>
+        <div class="field"><label for="login-password">Password</label><input id="login-password" class="input" type="password" autocomplete="current-password" required></div>
+        <div id="login-error" class="login-error" role="alert"></div>
+        <div class="form-actions"><button class="button primary" type="submit">Sign in</button></div>
+      </form>
+    </div>
+  </div>
+  <div class="layout" id="dashboard" hidden>
     <aside>
       <div class="brand">
         <div class="brand-mark">L</div>
@@ -178,14 +194,16 @@
       <button class="nav-link" data-view="leases"><span class="nav-icon">⌁</span><span class="nav-text">Leases</span></button>
       <button class="nav-link" data-view="events"><span class="nav-icon">≋</span><span class="nav-text">Event log</span></button>
       <button class="nav-link" data-view="packets"><span class="nav-icon">⇄</span><span class="nav-text">DHCP packets</span></button>
+      <button class="nav-link" data-view="query"><span class="nav-icon">⌕</span><span class="nav-text">Log query</span></button>
       <div class="nav-label">Detection</div>
       <button class="nav-link" data-view="rules"><span class="nav-icon">◇</span><span class="nav-text">SIEM rules</span></button>
+      <button class="nav-link" data-view="backups"><span class="nav-icon">▤</span><span class="nav-text">Backups</span></button>
       <div class="aside-bottom"><span class="online-dot"></span>Services online<br><span id="sidebar-clock"></span></div>
     </aside>
     <main>
       <header>
         <div class="crumb">Network security <span aria-hidden="true">/</span> <strong id="crumb-title">Overview</strong></div>
-        <div class="header-right"><span><span class="online-dot"></span>API connected</span><span class="refresh-note">AUTO REFRESH 10s</span></div>
+        <div class="header-right"><span><span class="online-dot"></span>API connected</span><span class="refresh-note">AUTO REFRESH 10s</span><button class="button small" id="logout-button">Sign out</button></div>
       </header>
       <div class="content">
         <div id="status" class="status" role="status" aria-live="polite"></div>
@@ -231,10 +249,40 @@
           </div>
         </section>
 
+        <section id="view-query" class="section">
+          <div class="page-head"><div><div class="eyebrow">TELEMETRY / QUERY</div><h1>Log query</h1><div class="subtitle">Search all fields in audit and DHCP packet logs with a bounded expression.</div></div></div>
+          <div class="panel">
+            <div class="filterbar">
+              <div class="toolbar">
+                <input id="query-expression" class="input" style="min-width:min(560px,70vw)" placeholder='event == "lease_allocated" and client == "02:00:00:00:00:01"'>
+                <select id="query-source" class="select"><option value="all">All logs</option><option value="events">Audit events</option><option value="packets">DHCP packets</option></select>
+                <button class="button primary" id="query-run">Run query</button>
+              </div>
+            </div>
+            <div class="panel-body" style="color:var(--muted);font-size:12px;line-height:1.7">
+              Operators: <code>== != &lt; &lt;= &gt; &gt;= in + - * / % and or not</code>.
+              Functions: <code>has("value")</code> searches any serialized field/value;
+              <code>contains(field, "text")</code> tests a field. Use field paths
+              such as <code>client_mac</code> or <code>details.address</code>, and
+              quoted indexing for unusual JSON keys. Results are capped at 1,000.
+            </div>
+            <div class="panel-meta" id="query-count" style="padding:0 15px 12px"></div>
+            <div class="table-wrap"><table><thead><tr><th>Time</th><th>Log</th><th>Event/type</th><th>Record</th></tr></thead><tbody id="query-results"></tbody></table></div>
+          </div>
+        </section>
+
         <section id="view-rules" class="section">
           <div class="page-head"><div><div class="eyebrow">DETECTION / RESPONSE</div><h1>SIEM rules</h1><div class="subtitle">Configure scheduled rules for starvation and pool-exhaustion signals.</div></div><button class="button primary" id="open-rule">＋ &nbsp;Create rule</button></div>
           <div class="panel"><div class="panel-head"><div><div class="panel-title">Configured rules</div><div class="panel-meta">Evaluated on the configured SIEM interval</div></div><button class="button small" id="rules-refresh">↻ Refresh</button></div><div class="table-wrap"><table><thead><tr><th>Rule</th><th>Detection</th><th>Threshold</th><th>Status</th><th>Actions</th></tr></thead><tbody id="rules-table"></tbody></table></div></div>
           <div class="panel" style="margin-top:15px"><div class="panel-head"><div class="panel-title">About built-in protection rules</div></div><div class="panel-body" style="color:var(--muted);font-size:12px;line-height:1.7">Rapid allocation detection flags a burst of lease allocations that may indicate DHCP starvation. High pool utilization highlights address exhaustion risk. Alerts are logged for investigation; these rules are detection-only and do not rate-limit or block DHCP clients.</div></div>
+        </section>
+
+        <section id="view-backups" class="section">
+          <div class="page-head"><div><div class="eyebrow">RECOVERY / STATE</div><h1>Backups</h1><div class="subtitle">Automatic compressed snapshots every 30 minutes, retained for 30 days.</div></div><button class="button primary" id="backup-create">＋ &nbsp;Create snapshot</button></div>
+          <div class="panel">
+            <div class="panel-head"><div><div class="panel-title">Recovery points</div><div class="panel-meta">Rollback restores lease/rule state and preserves current logs; current state is snapshotted first.</div></div><button class="button small" id="backup-refresh">↻ Refresh</button></div>
+            <div class="table-wrap"><table><thead><tr><th>Created</th><th>Reason</th><th>Archive size</th><th>Action</th></tr></thead><tbody id="backups-table"></tbody></table></div>
+          </div>
         </section>
       </div>
     </main>
@@ -250,9 +298,14 @@
     <div class="modal"><div class="modal-head"><h2 id="rule-modal-title">Create SIEM rule</h2><button class="button small" data-close="rule-modal" aria-label="Close">×</button></div>
       <form id="rule-form">
         <div class="field"><label for="rule-name">Rule name</label><input id="rule-name" class="input" required maxlength="100" placeholder="Allocation burst"></div>
-        <div class="field"><label for="rule-kind">Detection type</label><select id="rule-kind" class="select"><option value="event_rate">Event rate</option><option value="pool_usage">Pool usage</option></select></div>
+        <div class="field"><label for="rule-kind">Detection type</label><select id="rule-kind" class="select"><option value="event_rate">Event rate</option><option value="pool_usage">Pool usage</option><option value="expression">Expression</option></select></div>
         <div id="event-fields"><div class="field"><label for="rule-event">Event to monitor</label><select id="rule-event" class="select"><option value="lease_allocated">Lease allocated</option><option value="lease_assigned">Lease assigned</option><option value="lease_renewed">Lease renewed</option><option value="lease_declined">Lease declined</option></select></div><div class="field"><label for="rule-threshold">Trigger count</label><input id="rule-threshold" class="input" type="number" min="1" max="1000000" value="10"></div><div class="field"><label for="rule-window">Time window (seconds)</label><input id="rule-window" class="input" type="number" min="1" max="31536000" value="60"></div></div>
         <div id="pool-fields" hidden><div class="field"><label for="rule-percent">Pool utilization threshold (%)</label><input id="rule-percent" class="input" type="number" min="1" max="100" value="80"></div></div>
+        <div id="expression-fields" hidden>
+          <div class="field"><label for="rule-expression">Condition</label><input id="rule-expression" class="input" required placeholder='count_if("event == \'lease_allocated\'", 60) >= 20'></div>
+          <div class="field"><label for="rule-interval">Evaluation interval (seconds)</label><input id="rule-interval" class="input" type="number" min="1" max="2592000" value="60"></div>
+          <div class="panel-meta">Rules can use log fields and metrics (active_leases, pool_capacity, pool_usage). Use count_if("expression", seconds) for a rolling log count.</div>
+        </div>
         <label class="check-row"><input id="rule-enabled" type="checkbox" checked> Enable this rule</label>
         <div class="form-actions"><button type="button" class="button" data-close="rule-modal">Cancel</button><button class="button primary" type="submit">Save rule</button></div>
       </form>
@@ -264,7 +317,8 @@
     (() => {
       "use strict";
       const $ = (selector) => document.querySelector(selector);
-      const state = { leases: [], events: [], packets: [], rules: [], view: "overview", busy: false };
+      const state = { leases: [], events: [], packets: [], rules: [], backups: [], view: "overview", busy: false };
+      let csrfToken = "";
       const eventNames = {
         lease_allocated: "Lease allocated", lease_assigned: "Lease assigned",
         lease_renewed: "Lease renewed", lease_extended: "Lease extended",
@@ -285,15 +339,51 @@
         return hours ? `${hours}h ${minutes}m` : `${Math.max(1, minutes)}m`;
       };
       async function api(path, options = {}) {
+        const method = (options.method || "GET").toUpperCase();
+        const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
+        if (!["GET", "HEAD"].includes(method) && !path.startsWith("/api/auth/login") && csrfToken) {
+          headers["X-CSRF-Token"] = csrfToken;
+        }
         const response = await fetch(path, {
           ...options,
-          headers: { "Content-Type": "application/json", ...(options.headers || {}) }
+          credentials: "same-origin",
+          headers
         });
         let body;
         try { body = await response.json(); }
         catch { throw new Error(`Server returned invalid data (${response.status})`); }
-        if (!response.ok) throw new Error(body.error || `Request failed (${response.status})`);
+        if (!response.ok) {
+          if (response.status === 401) {
+            csrfToken = "";
+            $("#dashboard").hidden = true;
+            $("#login-screen").hidden = false;
+          }
+          throw new Error(body.error || `Request failed (${response.status})`);
+        }
         return body;
+      }
+      function showDashboard(csrf) {
+        csrfToken = csrf;
+        $("#login-screen").hidden = true;
+        $("#dashboard").hidden = false;
+        $("#login-error").textContent = "";
+      }
+      async function startDashboard() {
+        const session = await api("/api/auth/session");
+        if (!session.authenticated) {
+          $("#dashboard").hidden = true;
+          $("#login-screen").hidden = false;
+          return;
+        }
+        showDashboard(session.csrf_token);
+        await refresh();
+        await loadPoolStats();
+        await refreshBackups();
+        if (!state.refreshTimer) {
+          state.refreshTimer = setInterval(() => {
+            if (!$("#dashboard").hidden) refresh();
+          }, 10000);
+        }
       }
       function toast(message, error = false) {
         const node = $("#toast");
@@ -367,7 +457,7 @@
         const rules = $("#overview-rules");
         if (!state.rules.length) rules.innerHTML = '<div class="empty">No detection rules configured.</div>';
         else rules.innerHTML = state.rules.slice(0, 5).map((rule) =>
-          `<div class="rule-row"><div><div class="rule-name">${escapeHtml(rule.name)}</div><div class="rule-type">${escapeHtml(rule.type === "event_rate" ? `${rule.event_type} · ${rule.threshold} / ${rule.window_seconds}s` : `Pool utilization · ${rule.threshold_percent}%`)}</div></div><span class="badge ${rule.enabled ? "" : "off"}">${rule.enabled ? "Enabled" : "Paused"}</span></div>`
+          `<div class="rule-row"><div><div class="rule-name">${escapeHtml(rule.name)}</div><div class="rule-type">${escapeHtml(rule.type === "event_rate" ? `${rule.event_type} · ${rule.threshold} / ${rule.window_seconds}s` : rule.type === "pool_usage" ? `Pool utilization · ${rule.threshold_percent}%` : `${rule.expression} · every ${rule.interval_seconds}s`)}</div></div><span class="badge ${rule.enabled ? "" : "off"}">${rule.enabled ? "Enabled" : "Paused"}</span></div>`
         ).join("");
         const overview = $("#overview-leases");
         if (!state.leases.length) emptyRow(overview, 4, "No active leases.");
@@ -424,6 +514,40 @@
           tbody.append(row);
         });
       }
+      function renderQueryRecords(records, count) {
+        $("#query-count").textContent = `${count} match${count === 1 ? "" : "es"} · newest first`;
+        const tbody = $("#query-results");
+        if (!records.length) { emptyRow(tbody, 4, "No matching log records."); return; }
+        tbody.replaceChildren();
+        records.forEach((record) => {
+          const row = document.createElement("tr");
+          row.append(
+            cell(dateText(record.timestamp)),
+            cell(record.source_log),
+            cell(record.packet_type || record.event || "—", "mono"),
+            cell(JSON.stringify(record), "mono")
+          );
+          tbody.append(row);
+        });
+      }
+      function renderBackups(backups) {
+        state.backups = backups;
+        const tbody = $("#backups-table");
+        if (!backups.length) { emptyRow(tbody, 4, "No backups are available yet."); return; }
+        tbody.replaceChildren();
+        backups.forEach((backup) => {
+          const row = document.createElement("tr");
+          row.append(
+            cell(dateText(backup.created_at)),
+            cell(backup.reason),
+            cell(`${(backup.size_bytes / 1024).toFixed(1)} KiB`)
+          );
+          const action = document.createElement("td");
+          action.innerHTML = `<button class="button small danger" data-action="backup-restore" data-backup="${escapeHtml(backup.name)}">Restore state</button>`;
+          row.append(action);
+          tbody.append(row);
+        });
+      }
       function renderRules(rules) {
         const tbody = $("#rules-table");
         if (!rules.length) { emptyRow(tbody, 5, "No SIEM rules configured."); return; }
@@ -431,8 +555,8 @@
         rules.forEach((rule) => {
           const row = document.createElement("tr");
           row.append(cell(rule.name));
-          row.append(cell(rule.type === "event_rate" ? "Event rate" : "Pool utilization"));
-          row.append(cell(rule.type === "event_rate" ? `${rule.threshold} events / ${rule.window_seconds}s (${eventNames[rule.event_type] || rule.event_type})` : `${rule.threshold_percent}% pool usage`));
+          row.append(cell(rule.type === "expression" ? "Expression" : rule.type === "event_rate" ? "Event rate" : "Pool utilization"));
+          row.append(cell(rule.type === "event_rate" ? `${rule.threshold} events / ${rule.window_seconds}s (${eventNames[rule.event_type] || rule.event_type})` : rule.type === "pool_usage" ? `${rule.threshold_percent}% pool usage` : `${rule.expression} · every ${rule.interval_seconds}s`));
           row.append(cell(rule.enabled ? "Enabled" : "Paused"));
           const actions = document.createElement("td");
           actions.innerHTML = `<div class="actions"><button class="button small" data-action="toggle-rule" data-id="${escapeHtml(rule.id)}" data-enabled="${rule.enabled}">${rule.enabled ? "Pause" : "Enable"}</button><button class="button small danger" data-action="delete-rule" data-id="${escapeHtml(rule.id)}">Delete</button></div>`;
@@ -476,16 +600,53 @@
           renderPackets(state.packets);
         } catch (error) { toast(error.message, true); }
       }
+      async function runLogQuery() {
+        const expr = $("#query-expression").value.trim();
+        if (!expr) { toast("Enter a query expression.", true); return; }
+        const query = new URLSearchParams({
+          expr,
+          source: $("#query-source").value,
+          limit: "1000"
+        });
+        try {
+          const result = await api(`/api/search?${query}`);
+          renderQueryRecords(result.records || [], result.count || 0);
+        } catch (error) { toast(error.message, true); }
+      }
+      async function refreshBackups() {
+        try {
+          const result = await api("/api/backups");
+          renderBackups(result.backups || []);
+        } catch (error) { toast(error.message, true); }
+      }
+      async function restoreBackup(name) {
+        if (!confirm(`Restore lease/rule state from ${name}? Current logs will be preserved, and current state will first be snapshotted.`)) return;
+        try {
+          const result = await api(`/api/backups/${encodeURIComponent(name)}/restore`, { method: "POST", body: "{}" });
+          toast(`State restored. Safety snapshot: ${result.safety_snapshot}`);
+          await refresh();
+          await refreshRules();
+          await refreshBackups();
+        } catch (error) { toast(error.message, true); }
+      }
+      async function createBackup() {
+        try {
+          const result = await api("/api/backups", { method: "POST", body: "{}" });
+          toast(`Backup created: ${result.backup}`);
+          await refreshBackups();
+        } catch (error) { toast(error.message, true); }
+      }
       function navigate(view) {
         state.view = view;
         document.querySelectorAll(".section").forEach((section) => section.classList.toggle("active", section.id === `view-${view}`));
         document.querySelectorAll(".nav-link").forEach((link) => link.classList.toggle("active", link.dataset.view === view));
-        const title = ({ overview: "Overview", leases: "Leases", events: "Event log", packets: "DHCP packets", rules: "SIEM rules" })[view];
+        const title = ({ overview: "Overview", leases: "Leases", events: "Event log", packets: "DHCP packets", query: "Log query", rules: "SIEM rules", backups: "Backups" })[view];
         $("#crumb-title").textContent = title;
         if (view === "leases") searchLeases();
         if (view === "events") searchEvents();
         if (view === "packets") searchPackets();
         if (view === "rules") refreshRules();
+        if (view === "backups") refreshBackups();
       }
       async function refreshRules() {
         try { const result = await api("/api/rules"); state.rules = result.rules || []; renderRules(state.rules); renderOverview(Number($("#stat-alerts").textContent) || 0); }
@@ -532,6 +693,8 @@
       $("#event-clear").addEventListener("click", () => { $("#event-search").value = ""; $("#event-type").value = ""; searchEvents(); });
       $("#events-refresh").addEventListener("click", searchEvents);
       $("#packet-search-button").addEventListener("click", searchPackets);
+      $("#query-run").addEventListener("click", runLogQuery);
+      $("#query-expression").addEventListener("keydown", (event) => { if (event.key === "Enter") runLogQuery(); });
       $("#packet-clear").addEventListener("click", () => {
         $("#packet-since").value = "";
         $("#packet-until").value = "";
@@ -543,6 +706,8 @@
       });
       $("#packets-refresh").addEventListener("click", searchPackets);
       $("#rules-refresh").addEventListener("click", refreshRules);
+      $("#backup-refresh").addEventListener("click", refreshBackups);
+      $("#backup-create").addEventListener("click", createBackup);
       document.querySelectorAll("[data-refresh]").forEach((button) => button.addEventListener("click", refresh));
       document.querySelectorAll("[data-navigate]").forEach((button) => button.addEventListener("click", () => navigate(button.dataset.navigate)));
       document.querySelectorAll(".nav-link").forEach((button) => button.addEventListener("click", () => navigate(button.dataset.view)));
@@ -550,6 +715,7 @@
         const button = event.target.closest("button[data-action]");
         if (!button) return;
         if (button.dataset.action === "toggle-rule" || button.dataset.action === "delete-rule") ruleAction(button);
+        else if (button.dataset.action === "backup-restore") restoreBackup(button.dataset.backup);
         else leaseAction(button);
       });
       function openModal(id) { $(`#${id}`).classList.add("open"); }
@@ -571,9 +737,10 @@
       });
       $("#open-rule").addEventListener("click", () => openModal("rule-modal"));
       $("#rule-kind").addEventListener("change", () => {
-        const pool = $("#rule-kind").value === "pool_usage";
-        $("#event-fields").hidden = pool;
-        $("#pool-fields").hidden = !pool;
+        const kind = $("#rule-kind").value;
+        $("#event-fields").hidden = kind !== "event_rate";
+        $("#pool-fields").hidden = kind !== "pool_usage";
+        $("#expression-fields").hidden = kind !== "expression";
       });
       $("#rule-form").addEventListener("submit", async (event) => {
         event.preventDefault();
@@ -582,7 +749,12 @@
           rule.event_type = $("#rule-event").value;
           rule.threshold = Number($("#rule-threshold").value);
           rule.window_seconds = Number($("#rule-window").value);
-        } else rule.threshold_percent = Number($("#rule-percent").value);
+        } else if (rule.type === "pool_usage") {
+          rule.threshold_percent = Number($("#rule-percent").value);
+        } else {
+          rule.expression = $("#rule-expression").value.trim();
+          rule.interval_seconds = Number($("#rule-interval").value);
+        }
         try {
           await api("/api/rules", { method: "POST", body: JSON.stringify(rule) });
           closeModal("rule-modal");
@@ -590,6 +762,7 @@
           $("#rule-kind").value = "event_rate";
           $("#event-fields").hidden = false;
           $("#pool-fields").hidden = true;
+          $("#expression-fields").hidden = true;
           toast("SIEM rule created.");
           await refreshRules();
         } catch (error) { toast(error.message, true); }
@@ -604,8 +777,37 @@
           $("#stat-capacity").textContent = `Pool stats unavailable: ${error.message}`;
         }
       }
-      refresh().then(loadPoolStats);
-      setInterval(() => { refresh(); }, 10000);
+      $("#login-form").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        $("#login-error").textContent = "";
+        try {
+          const session = await api("/api/auth/login", {
+            method: "POST",
+            body: JSON.stringify({
+              username: $("#login-user").value.trim(),
+              password: $("#login-password").value
+            })
+          });
+          showDashboard(session.csrf_token);
+          $("#login-password").value = "";
+          await startDashboard();
+        } catch (error) {
+          $("#login-error").textContent = error.message;
+        }
+      });
+      $("#logout-button").addEventListener("click", async () => {
+        try {
+          await api("/api/auth/logout", { method: "POST", body: "{}" });
+        } catch (error) {
+          toast(error.message, true);
+        }
+        csrfToken = "";
+        $("#dashboard").hidden = true;
+        $("#login-screen").hidden = false;
+      });
+      startDashboard().catch((error) => {
+        $("#login-error").textContent = `Could not check session: ${error.message}`;
+      });
     })();
   </script>
 </body>

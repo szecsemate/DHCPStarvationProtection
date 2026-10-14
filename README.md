@@ -31,8 +31,11 @@ covers the Debian/Proxmox multi-interface troubleshooting case.
 DHCPStarvationProtection/
 ├── dhcp/                  server package
 │   ├── cli.py             command-line configuration and startup
+│   ├── auth.py            dashboard password and session handling
+│   ├── backups.py         integrity-checked backups and state rollback
 │   ├── leases.py          lease management and persistence
 │   ├── protocol.py        DHCP packet constants and helpers
+│   ├── query.py           safe log-search and rule expression language
 │   ├── server.py          DHCP message handling and UDP socket
 │   └── siem.py            HTTP API, separate lease/packet logs, and SIEM rules
 ├── docs/
@@ -115,6 +118,16 @@ DHCPDISCOVER packets.
 | `--dhcp-packet-log-file` | No | `dhcp_packets.jsonl` | Separate JSON-lines log of received and sent DHCP packets |
 | `--siem-rules-file` | No | `siem_rules.json` | Persistent SIEM rules |
 | `--siem-interval` | No | `10` | Rule evaluation interval in seconds |
+| `--backup-dir` | No | `dhcp_backups` | Directory for compressed state/log snapshots |
+| `--backup-interval` | No | `1800` | Automatic snapshot interval in seconds |
+| `--backup-retention-days` | No | `30` | Retention age for snapshots |
+
+The dashboard uses a single `root` account. Its default password is `root` to
+match the requested initial setup; override it before startup with
+`DHCP_DASHBOARD_PASSWORD` and change it before exposing the service to users.
+Dashboard credentials travel over plain HTTP unless TLS is provided by a
+trusted reverse proxy. Bind the dashboard to a trusted address or protect it
+with a firewall; authentication does not encrypt traffic.
 
 For example, advertise a router, DNS and NTP servers, a domain, and reserve an
 address for one Ethernet client:
@@ -159,6 +172,14 @@ python3 -m unittest
   and destination addresses in a separate JSON-lines packet log.
 - Evaluates configurable event-rate and pool-usage rules on a timer. Default
   rules alert on 20 allocations in 60 seconds and at least 80% pool use.
+- Requires login for dashboard API data and management routes, with expiring
+  in-memory sessions, CSRF validation, and per-address failed-login throttling.
+- Creates compressed integrity-checked snapshots at startup and every 30
+  minutes by default, retaining 30 days. Snapshots include lease state, SIEM
+  rules, and both logs; manual restore rolls back lease/rule state while
+  preserving active logs and creating a safety snapshot first.
+- Supports safe expression searches across arbitrary fields in audit and
+  packet records, plus scheduled expression rules with rolling `count_if()`.
 
 ## Lease management and SIEM dashboard
 
@@ -169,10 +190,11 @@ searchable lease management (assign, renew, extend, release), searchable audit
 events, a separate searchable DHCP packet log, and SIEM rule creation,
 enable/disable, and deletion. Packet search filters support a time range,
 source IPv4 address, destination IPv4 address, and DHCP message type. The
-dashboard refreshes automatically every 10 seconds. The HTTP service has no authentication and
-binds to all IPv4 interfaces by default. Restrict access with a firewall or
-bind it to a trusted interface/address; do not expose it to an untrusted
-network.
+dashboard refreshes automatically every 10 seconds. Sign in with the configured
+dashboard credentials. The HTTP service binds to all IPv4 interfaces by
+default; restrict access with a firewall or bind it to a trusted
+interface/address. Use TLS through a trusted reverse proxy on networks where
+credentials must not travel in cleartext.
 
 The site uses these JSON endpoints internally:
 
@@ -186,18 +208,48 @@ The site uses these JSON endpoints internally:
 | `POST /api/leases/<mac>/extend` with `{"seconds":3600}` | Extend its current expiry by the requested seconds. |
 | `GET /api/logs?event=<type>&client=<mac>&address=<ip>&since=<ISO-8601>&q=<term>&limit=<n>` | Search JSON audit events. |
 | `GET /api/packets?since=<ISO-8601>&until=<ISO-8601>&source=<ip>&destination=<ip>&type=<DHCP-type>&limit=<n>` | Search the separate DHCP packet log by inclusive time bounds, source/destination IPv4 address, and packet type. |
+| `GET /api/search?expr=<expression>&source=all\|events\|packets&limit=<n>` | Search arbitrary JSON log fields with the query language. |
+| `POST /api/auth/login` | Authenticate and receive an HttpOnly session cookie plus CSRF token. |
+| `GET /api/auth/session`, `POST /api/auth/logout` | Check or end the current session. |
 | `GET /api/rules` | List rules. |
 | `POST /api/rules` | Create a rule. |
 | `PATCH /api/rules/<id>` | Update a rule. |
 | `DELETE /api/rules/<id>` | Delete a rule. |
+| `GET /api/backups`, `POST /api/backups` | List snapshots or create one immediately. |
+| `POST /api/backups/<name>/restore` | Restore lease/rule state from a verified snapshot; logs remain active. |
 | `GET /api/stats` | Get active lease count and address-pool utilization. |
 
 The root (`/`) serves the dashboard page; the JSON endpoints remain available
 for integrations.
 
-Rules are either `event_rate` (`event_type`, `threshold`, and
-`window_seconds`) or `pool_usage` (`threshold_percent`); both accept `name`
-and `enabled`. For example, create an allocation-burst rule with:
+Rules can be `event_rate` (`event_type`, `threshold`, and `window_seconds`),
+`pool_usage` (`threshold_percent`), or `expression` (`expression` and
+`interval_seconds`). All accept `name` and `enabled`. The expression language
+uses JSON field paths (including nested paths), constants, comparisons,
+`and`/`or`/`not`, numeric arithmetic, `has("text")`, and
+`contains(field, "text")`. It does not execute Python. Searches are written as
+Boolean expressions, for example:
+
+```text
+event == "lease_allocated" and contains(address, "192.0.2.")
+has("suspicious-mac") and source_log == "packet"
+```
+
+Expression rules additionally support rolling log counts with
+`count_if("query expression", seconds)`. For example, alert when at least 10
+allocation events occurred in the last 60 seconds:
+
+```json
+{
+  "name": "Allocation burst",
+  "type": "expression",
+  "expression": "count_if(\"event == 'lease_allocated'\", 60) >= 10",
+  "interval_seconds": 30,
+  "enabled": true
+}
+```
+
+The existing `event_rate` form remains available:
 
 ```json
 {
@@ -212,9 +264,9 @@ and `enabled`. For example, create an allocation-burst rule with:
 
 The built-in starvation-oriented rules detect rapid allocations to many
 clients and high address-pool utilization. Triggered rules append `siem_alert`
-events to the searchable lease/SIEM JSON-lines log. Rule state is stored
-separately from DHCP lease state; back up the lease file, SIEM rules, lease/SIEM
-event log, and DHCP packet log.
+events to the searchable lease/SIEM JSON-lines log. The dashboard's Query view
+searches all fields in either log; `has("term")` searches an entire record.
+The query evaluator bounds expression complexity and record scans.
 
 ## Limitations
 
@@ -222,16 +274,20 @@ event log, and DHCP packet log.
   and it does not support DHCPv6.
 - It does not enforce per-client request rate limits or quotas. SIEM alerts
   are detection-only and do not block clients or mitigate starvation.
-- The HTTP dashboard and management endpoints have no authentication or
-  authorization. The listener binds to all IPv4 interfaces by default; restrict
-  access with a firewall or bind to a trusted address.
+- Dashboard login is a single-user control, not a production identity system.
+  The default `root`/`root` credentials must be changed. Sessions are held in
+  memory and are lost on restart. HTTP does not encrypt credentials; use a TLS
+  reverse proxy and restrict network exposure.
 - Lease updates are synchronized among threads in one process, but separate
   server processes must not share the same lease file.
-- The JSON file is not a replicated database or a backup strategy. Keep it
-  available and writable; malformed state files prevent startup so they can
-  be repaired rather than silently discarded.
+- Automatic local backups provide recovery, not replication or off-host
+  disaster recovery. Keep the backup directory on reliable storage and copy
+  important snapshots off-host. Malformed active lease state prevents startup
+  rather than being silently discarded.
 - It does not probe the network to detect addresses used by devices with
   manually configured IP addresses.
+- It supports Ethernet DHCP clients with six-byte MAC addresses; other BOOTP
+  hardware-address formats are rejected.
 - It is intended for learning and controlled testing, not as a replacement for
   a maintained production DHCP service.
 

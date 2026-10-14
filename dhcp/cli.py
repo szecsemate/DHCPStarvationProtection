@@ -72,6 +72,23 @@ def parse_args():
         default=10,
         help="Rule evaluation interval in seconds",
     )
+    parser.add_argument(
+        "--backup-dir",
+        default="dhcp_backups",
+        help="Directory for compressed DHCP recovery snapshots",
+    )
+    parser.add_argument(
+        "--backup-interval",
+        type=int,
+        default=1800,
+        help="Automatic backup interval in seconds (default: 1800)",
+    )
+    parser.add_argument(
+        "--backup-retention-days",
+        type=int,
+        default=30,
+        help="Keep backup snapshots for this many days (default: 30)",
+    )
     return parser.parse_args()
 
 
@@ -104,6 +121,9 @@ def main():
             rules_file=args.siem_rules_file,
             evaluation_interval=args.siem_interval,
             packet_log_file=args.dhcp_packet_log_file,
+            backup_dir=args.backup_dir,
+            backup_interval=args.backup_interval,
+            backup_retention_days=args.backup_retention_days,
         )
         try:
             siem.start_http(args.http_bind_address, args.http_port)

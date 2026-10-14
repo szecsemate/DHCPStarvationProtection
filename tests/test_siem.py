@@ -1,4 +1,5 @@
 import json
+import http.cookiejar
 import tempfile
 import time
 import unittest
@@ -36,10 +37,23 @@ class SIEMServiceTests(unittest.TestCase):
             rules_file=root / "rules.json",
             evaluation_interval=60,
             packet_log_file=root / "packets.jsonl",
+            backup_dir=root / "backups",
+            backup_interval=3600,
         )
         host, port = self.siem.start_http("0.0.0.0", 0)
         self.assertNotEqual(host, self.server.bind_address)
         self.base_url = "http://127.0.0.1:{}".format(port)
+        self.cookies = http.cookiejar.CookieJar()
+        self.opener = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(self.cookies)
+        )
+        self.csrf_token = None
+        _, login = self.request(
+            "POST",
+            "/api/auth/login",
+            {"username": "root", "password": "root"},
+        )
+        self.csrf_token = login["csrf_token"]
 
     def tearDown(self):
         self.siem.close()
@@ -53,8 +67,13 @@ class SIEMServiceTests(unittest.TestCase):
             method=method,
             headers={"Content-Type": "application/json"},
         )
-        with urllib.request.urlopen(request) as response:
-            return response.status, json.load(response)
+        if method not in ("GET", "HEAD") and path != "/api/auth/login" and self.csrf_token:
+            request.add_header("X-CSRF-Token", self.csrf_token)
+        with self.opener.open(request) as response:
+            result = json.load(response)
+            if path == "/api/auth/login" and response.status == 200:
+                self.csrf_token = result["csrf_token"]
+            return response.status, result
 
     def test_lease_search_management_and_json_audit(self):
         self.server.allocate_address(bytes.fromhex("020000000001"))
@@ -145,11 +164,146 @@ class SIEMServiceTests(unittest.TestCase):
                 {"type": "pool_usage", "threshold_percent": 101}
             ).encode("utf-8"),
             method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "X-CSRF-Token": self.csrf_token,
+            },
+        )
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            self.opener.open(request)
+        self.assertEqual(error.exception.code, 400)
+
+    def test_management_api_requires_login_and_csrf(self):
+        request = urllib.request.Request(self.base_url + "/api/stats")
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(request)
+        self.assertEqual(error.exception.code, 401)
+
+        request = urllib.request.Request(
+            self.base_url + "/api/rules",
+            data=b"{}",
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            self.opener.open(request)
+        self.assertEqual(error.exception.code, 403)
+
+    def test_login_attempts_are_rate_limited(self):
+        for _ in range(5):
+            request = urllib.request.Request(
+                self.base_url + "/api/auth/login",
+                data=json.dumps(
+                    {"username": "root", "password": "incorrect"}
+                ).encode("utf-8"),
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                urllib.request.urlopen(request)
+            self.assertEqual(error.exception.code, 401)
+        request = urllib.request.Request(
+            self.base_url + "/api/auth/login",
+            data=json.dumps(
+                {"username": "root", "password": "incorrect"}
+            ).encode("utf-8"),
+            method="POST",
             headers={"Content-Type": "application/json"},
         )
         with self.assertRaises(urllib.error.HTTPError) as error:
             urllib.request.urlopen(request)
+        self.assertEqual(error.exception.code, 429)
+
+    def test_query_language_searches_arbitrary_log_fields_and_values(self):
+        self.siem.record_event(
+            "lease_allocated",
+            client=CLIENT_ONE,
+            address="192.0.2.10",
+            nested={"operator_note": "special value"},
+        )
+        query = urlencode(
+            {
+                "expr": 'event == "lease_allocated" and contains(nested.operator_note, "special")',
+                "source": "events",
+            }
+        )
+        _, result = self.request("GET", "/api/search?" + query)
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["records"][0]["nested"]["operator_note"], "special value")
+
+        query = urlencode({"expr": 'has("192.0.2.10")', "source": "all"})
+        _, result = self.request("GET", "/api/search?" + query)
+        self.assertTrue(any(row["event"] == "lease_allocated" for row in result["records"]))
+
+    def test_query_language_rejects_arbitrary_code_and_unsafe_functions(self):
+        for expression in (
+            "__import__('os').system('echo bad')",
+            "event == 'lease_allocated' and (1 / 0) > 0",
+            "count_if('event == \"lease_allocated\"', 60) > 0",
+        ):
+            query = urlencode({"expr": expression})
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                self.opener.open(self.base_url + "/api/search?" + query)
+            self.assertEqual(error.exception.code, 400)
+
+    def test_query_language_bounds_numeric_field_arithmetic(self):
+        self.siem.record_event("lease_allocated", metric=1e100)
+        query = urlencode(
+            {"expr": "metric * metric > 0", "source": "events"}
+        )
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            self.opener.open(self.base_url + "/api/search?" + query)
         self.assertEqual(error.exception.code, 400)
+
+    def test_expression_rules_support_windowed_counts(self):
+        self.siem.record_event("lease_allocated", client=CLIENT_ONE, address="192.0.2.10")
+        self.siem.record_event("lease_allocated", client=CLIENT_TWO, address="192.0.2.11")
+        _, result = self.request(
+            "POST",
+            "/api/rules",
+            {
+                "name": "Test expression",
+                "type": "expression",
+                "expression": 'count_if("event == \'lease_allocated\'", 60) >= 2',
+                "interval_seconds": 1,
+                "enabled": True,
+            },
+        )
+        alerts = self.siem.evaluate_rules()
+        self.assertTrue(any(alert["rule_id"] == result["rule"]["id"] for alert in alerts))
+
+    def test_backup_rollback_restores_state_but_preserves_logs(self):
+        client_one = bytes.fromhex("020000000001")
+        client_two = bytes.fromhex("020000000002")
+        self.server.allocate_address(client_one)
+        checkpoint = self.siem.backups.create_snapshot("test")
+        self.server.allocate_address(client_two)
+        self.siem.record_event("lease_assigned", client=CLIENT_TWO, address="192.0.2.11")
+
+        restored = self.siem.restore_backup(checkpoint)
+
+        self.assertIn(client_one, self.server.leases)
+        self.assertNotIn(client_two, self.server.leases)
+        self.assertTrue(
+            any(
+                event.get("client") == CLIENT_TWO
+                for event in self.siem.events.search({"event": "lease_assigned"})
+            )
+        )
+        self.assertEqual(restored["restored"], checkpoint)
+        self.assertNotEqual(restored["safety_snapshot"], checkpoint)
+        self.assertGreaterEqual(len(self.siem.backups.list_snapshots()), 3)
+
+    def test_corrupt_backup_is_rejected_without_changing_live_state(self):
+        client = bytes.fromhex("020000000001")
+        self.server.allocate_address(client)
+        checkpoint = self.siem.backups.create_snapshot("test")
+        backup_path = self.siem.backups.directory / checkpoint
+        backup_path.write_bytes(backup_path.read_bytes()[:-8])
+
+        with self.assertRaises(ValueError):
+            self.siem.restore_backup(checkpoint)
+        self.assertIn(client, self.server.leases)
 
     def test_expired_lease_is_removed_and_logged(self):
         client = bytes.fromhex("020000000001")
@@ -208,7 +362,7 @@ class SIEMServiceTests(unittest.TestCase):
                 method="GET",
             )
             with self.assertRaises(urllib.error.HTTPError) as error:
-                urllib.request.urlopen(request)
+                self.opener.open(request)
             self.assertEqual(error.exception.code, 400)
 
 

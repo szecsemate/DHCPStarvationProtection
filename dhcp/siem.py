@@ -1,5 +1,6 @@
 """HTTP lease management, JSON audit logging, and scheduled SIEM rules."""
 
+import heapq
 import ipaddress
 import json
 import logging
@@ -11,10 +12,16 @@ import uuid
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from http.cookies import CookieError
+from http.cookies import SimpleCookie
 from typing import Union
 from urllib.parse import parse_qs, unquote, urlparse
 
+from .auth import LoginRateLimited, SessionAuth
+from .backups import BackupError, BackupManager
+from .leases import LeaseManager
 from .protocol import DHCP_MESSAGE_TYPES, parse_mac
+from .query import QueryError, compile_expression
 
 LOG = logging.getLogger("dhcp-siem")
 
@@ -87,6 +94,25 @@ class JsonEventLog:
                 event_file.flush()
                 os.fsync(event_file.fileno())
         return record
+
+    def iter_records(self):
+        """Yield validated records while holding this log's writer/search lock."""
+        with self.lock:
+            if not self.path.exists():
+                return
+            with self.path.open("r", encoding="utf-8") as event_file:
+                for line_number, line in enumerate(event_file, 1):
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError as error:
+                        raise EventLogError(
+                            "invalid JSON log record at line {}".format(line_number)
+                        ) from error
+                    if not isinstance(record, dict):
+                        raise EventLogError(
+                            "invalid log record at line {}".format(line_number)
+                        )
+                    yield record
 
     def search(self, filters):
         records = []
@@ -173,6 +199,10 @@ class SIEMService:
         rules_file: Union[str, os.PathLike] = "siem_rules.json",
         evaluation_interval=10,
         packet_log_file: Union[str, os.PathLike] = "dhcp_packets.jsonl",
+        backup_dir: Union[str, os.PathLike] = "dhcp_backups",
+        backup_interval=1800,
+        backup_retention_days=30,
+        dashboard_password=None,
     ):
         if evaluation_interval < 1:
             raise ValueError("rule evaluation interval must be at least one second")
@@ -185,9 +215,29 @@ class SIEMService:
         self.stop_event = threading.Event()
         self.rules = self._load_rules()
         self._last_triggered = {}
+        self._last_evaluated = {}
+        self.auth = SessionAuth(
+            password=dashboard_password
+            if dashboard_password is not None
+            else os.environ.get("DHCP_DASHBOARD_PASSWORD", "root")
+        )
         self.dhcp_server.lease_manager.event_callback = self.record_event
         self.dhcp_server.packet_callback = self.record_packet
         self.http_server = None
+        lease_file = self.dhcp_server.lease_manager.lease_file
+        if lease_file is None:
+            raise ValueError("dashboard backups require a persistent DHCP lease file")
+        self.backups = BackupManager(
+            backup_dir,
+            {
+                "lease_state": (lease_file, self.dhcp_server.lease_manager.lock),
+                "rules": (self.rules_file, self.lock),
+                "audit_log": (self.events.path, self.events.lock),
+                "packet_log": (self.packets.path, self.packets.lock),
+            },
+            interval_seconds=backup_interval,
+            retention_days=backup_retention_days,
+        )
         self.scheduler = threading.Thread(
             target=self._schedule_rules, name="dhcp-siem-rules", daemon=True
         )
@@ -214,7 +264,11 @@ class SIEMService:
         rules = state.get("rules")
         if not isinstance(rules, list):
             raise ValueError("SIEM rules file must contain a rules list")
-        return [self._validate_rule(rule) for rule in rules]
+        validated = [self._validate_rule(rule) for rule in rules]
+        identifiers = [rule["id"] for rule in validated]
+        if len(identifiers) != len(set(identifiers)):
+            raise ValueError("SIEM rules file contains duplicate rule IDs")
+        return validated
 
     def _save_rules(self, rules):
         self.rules_file.parent.mkdir(parents=True, exist_ok=True)
@@ -281,12 +335,37 @@ class SIEMService:
                 "threshold_percent": threshold,
                 "enabled": rule.get("enabled", True),
             }
+        elif rule_type == "expression":
+            expression = rule.get("expression")
+            interval = rule.get("interval_seconds", 60)
+            if not isinstance(expression, str):
+                raise ValueError("expression must be a string")
+            compile_expression(expression, allow_count=True)
+            if (
+                isinstance(interval, bool)
+                or not isinstance(interval, int)
+                or not 1 <= interval <= 30 * 24 * 60 * 60
+            ):
+                raise ValueError("interval_seconds must be between 1 and 2592000")
+            result = {
+                "id": str(rule.get("id") or uuid.uuid4()),
+                "name": str(rule.get("name") or "Expression rule"),
+                "type": rule_type,
+                "expression": expression,
+                "interval_seconds": interval,
+                "enabled": rule.get("enabled", True),
+            }
         else:
-            raise ValueError("rule type must be event_rate or pool_usage")
+            raise ValueError("rule type must be event_rate, pool_usage, or expression")
         if not isinstance(result["enabled"], bool):
             raise ValueError("enabled must be a boolean")
-        if not result["id"] or not result["name"]:
-            raise ValueError("rule id and name must not be empty")
+        if (
+            not result["id"]
+            or not result["name"]
+            or len(result["id"]) > 128
+            or len(result["name"]) > 100
+        ):
+            raise ValueError("rule id and name must contain 1 to 128 and 1 to 100 characters")
         return result
 
     def list_leases(self, filters):
@@ -392,6 +471,70 @@ class SIEMService:
             self.rules = updated
             self._save_rules(self.rules)
 
+    def search_logs(self, expression, source="all", limit=100):
+        """Search arbitrary audit/packet JSON fields with a safe expression."""
+        if source not in ("all", "events", "packets"):
+            raise ValueError("source must be all, events, or packets")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+            raise ValueError("limit must be between 1 and 1000")
+        query = compile_expression(expression)
+        logs = []
+        if source in ("all", "events"):
+            logs.append(("audit", self.events))
+        if source in ("all", "packets"):
+            logs.append(("packet", self.packets))
+
+        heap = []
+        match_count = 0
+        sequence = 0
+        for label, event_log in logs:
+            for stored_record in event_log.iter_records():
+                record = dict(stored_record)
+                record["source_log"] = label
+                if not query.matches(record):
+                    continue
+                try:
+                    timestamp = _parse_timestamp(
+                        record.get("timestamp", ""), "log timestamp"
+                    ).timestamp()
+                except ValueError as error:
+                    raise EventLogError("matching log record has an invalid timestamp") from error
+                match_count += 1
+                sequence += 1
+                item = (timestamp, sequence, record)
+                if len(heap) < limit:
+                    heapq.heappush(heap, item)
+                elif item[:2] > heap[0][:2]:
+                    heapq.heapreplace(heap, item)
+        matches = [
+            item[2]
+            for item in sorted(heap, key=lambda item: item[:2], reverse=True)
+        ]
+        return {"records": matches, "count": match_count}
+
+    def _count_matching_records(self, query, window_seconds, now):
+        cutoff = now - window_seconds
+        count = 0
+        scanned = 0
+        for label, event_log in (("audit", self.events), ("packet", self.packets)):
+            for stored_record in event_log.iter_records():
+                scanned += 1
+                if scanned > 100000:
+                    raise QueryError("count_if() scan exceeded 100000 log records")
+                record = dict(stored_record)
+                record["source_log"] = label
+                try:
+                    timestamp = _parse_timestamp(
+                        record.get("timestamp", ""), "log timestamp"
+                    ).timestamp()
+                except ValueError as error:
+                    raise EventLogError(
+                        "log record has an invalid timestamp"
+                    ) from error
+                if timestamp >= cutoff and query.matches(record):
+                    count += 1
+        return count
+
     def evaluate_rules(self):
         now = time.time()
         leases = self.list_leases({})
@@ -406,8 +549,62 @@ class SIEMService:
         alerts = []
         with self.lock:
             rules = [dict(rule) for rule in self.rules if rule["enabled"]]
+        count_cache = {}
         for rule in rules:
-            if rule["type"] == "event_rate":
+            if rule["type"] == "expression":
+                interval = rule["interval_seconds"]
+                with self.lock:
+                    last_evaluated = self._last_evaluated.get(rule["id"], 0)
+                    if now - last_evaluated < interval:
+                        continue
+                    self._last_evaluated[rule["id"]] = now
+                expression = compile_expression(
+                    rule["expression"], allow_count=True
+                )
+
+                def count_callback(query, seconds):
+                    key = (query.source, seconds)
+                    if key not in count_cache:
+                        count_cache[key] = self._count_matching_records(
+                            query, seconds, now
+                        )
+                    return count_cache[key]
+
+                metrics = {
+                    "active_leases": len(leases),
+                    "pool_capacity": pool_size,
+                    "pool_usage": pool_usage,
+                }
+                triggered = expression.matches(metrics, count_callback)
+                detail = "expression evaluated to {}".format(triggered)
+                if not triggered:
+                    scanned = 0
+                    for label, event_log in (("audit", self.events), ("packet", self.packets)):
+                        for stored_record in event_log.iter_records():
+                            scanned += 1
+                            if scanned > 100000:
+                                raise QueryError("rule scan exceeded 100000 log records")
+                            record = dict(stored_record)
+                            record["source_log"] = label
+                            try:
+                                timestamp = _parse_timestamp(
+                                    record.get("timestamp", ""), "log timestamp"
+                                ).timestamp()
+                            except ValueError as error:
+                                raise EventLogError(
+                                    "log record has an invalid timestamp"
+                                ) from error
+                            if timestamp < now - interval:
+                                continue
+                            context = dict(metrics)
+                            context.update(record)
+                            if expression.matches(context, count_callback):
+                                triggered = True
+                                detail = "expression matched a log record"
+                                break
+                        if triggered:
+                            break
+            elif rule["type"] == "event_rate":
                 cutoff = datetime.fromtimestamp(
                     now - rule["window_seconds"], timezone.utc
                 ).isoformat()
@@ -441,18 +638,85 @@ class SIEMService:
                     "siem_alert",
                     rule_id=rule["id"],
                     rule_name=rule["name"],
-                    severity="high" if rule["type"] == "event_rate" else "medium",
+                    severity=(
+                        "high"
+                        if rule["type"] == "event_rate"
+                        else "medium"
+                    ),
                     details=detail,
                 )
             )
         return alerts
 
     def _schedule_rules(self):
-        while not self.stop_event.wait(self.evaluation_interval):
+        while True:
+            with self.lock:
+                expression_intervals = [
+                    rule["interval_seconds"]
+                    for rule in self.rules
+                    if rule.get("enabled") and rule["type"] == "expression"
+                ]
+            interval = min(
+                [self.evaluation_interval] + expression_intervals
+            )
+            if self.stop_event.wait(interval):
+                return
             try:
                 self.evaluate_rules()
             except (OSError, ValueError):
                 LOG.exception("SIEM rule evaluation failed")
+
+    def _validate_backup_payloads(self, payloads):
+        manager = self.dhcp_server.lease_manager
+        lease_data = payloads["lease_state"]
+        if lease_data is not None:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                lease_path = Path(temp_dir) / "leases.json"
+                lease_path.write_bytes(lease_data)
+                LeaseManager(
+                    network=manager.network,
+                    server_ip=manager.server_ip,
+                    pool_start=manager.pool_start,
+                    pool_end=manager.pool_end,
+                    lease_seconds=manager.lease_seconds,
+                    decline_hold_seconds=manager.decline_hold_seconds,
+                    lease_file=lease_path,
+                    reservations=list(manager.reservations.items()),
+                )
+        rules_data = payloads["rules"]
+        if rules_data is not None:
+            try:
+                state = json.loads(rules_data.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise BackupError("backup SIEM rules are not valid JSON") from error
+            if (
+                not isinstance(state, dict)
+                or state.get("version") != 1
+                or not isinstance(state.get("rules"), list)
+            ):
+                raise BackupError("backup SIEM rules have an unsupported format")
+            rules = [self._validate_rule(rule) for rule in state["rules"]]
+            identifiers = [rule["id"] for rule in rules]
+            if len(identifiers) != len(set(identifiers)):
+                raise BackupError("backup SIEM rules contain duplicate IDs")
+
+    def restore_backup(self, filename):
+        """Restore lease/rule state from a verified checkpoint, retaining logs."""
+        def reload_state():
+            manager = self.dhcp_server.lease_manager
+            manager.leases.clear()
+            manager.quarantined.clear()
+            manager.load_state()
+            with self.lock:
+                self.rules = self._load_rules()
+                self._last_evaluated.clear()
+                self._last_triggered.clear()
+
+        return self.backups.restore_state(
+            filename,
+            validate=self._validate_backup_payloads,
+            reload_state=reload_state,
+        )
 
     def start_http(self, host="0.0.0.0", port=8080):
         service = self
@@ -461,13 +725,24 @@ class SIEMService:
             def log_message(self, format_string, *args):
                 LOG.info("HTTP %s - %s", self.address_string(), format_string % args)
 
-            def _send(self, status, value):
+            def _send(self, status, value, headers=()):
                 payload = json.dumps(value, sort_keys=True).encode("utf-8")
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Content-Length", str(len(payload)))
+                for name, value in headers:
+                    self.send_header(name, value)
                 self.end_headers()
                 self.wfile.write(payload)
+
+            def _session_token(self):
+                cookie = SimpleCookie()
+                try:
+                    cookie.load(self.headers.get("Cookie", ""))
+                except CookieError:
+                    return None
+                morsel = cookie.get("dhcp_session")
+                return morsel.value if morsel is not None else None
 
             def _send_dashboard(self):
                 dashboard = Path(__file__).with_name("dashboard.html")
@@ -501,14 +776,75 @@ class SIEMService:
 
             def _dispatch(self):
                 parsed = urlparse(self.path)
-                query = parse_qs(parsed.query)
-                params = {key: values[-1] for key, values in query.items() if values}
-                if params.get("client"):
-                    params["client"] = parse_mac(params["client"]).hex(":")
                 parts = [unquote(part) for part in parsed.path.split("/") if part]
                 if parsed.path in ("/", "/index.html") and self.command == "GET":
                     self._send_dashboard()
                     return
+
+                token = self._session_token()
+                session = service.auth.session(token)
+                if parts == ["api", "auth", "login"] and self.command == "POST":
+                    credentials = self._body()
+                    try:
+                        result = service.auth.login(
+                            self.client_address[0],
+                            credentials.get("username"),
+                            credentials.get("password"),
+                        )
+                    except LoginRateLimited as error:
+                        self._send(429, {"error": str(error)})
+                        return
+                    if result is None:
+                        self._send(401, {"error": "invalid username or password"})
+                        return
+                    token, csrf_token = result
+                    self._send(
+                        200,
+                        {"authenticated": True, "csrf_token": csrf_token},
+                        (
+                            (
+                                "Set-Cookie",
+                                "dhcp_session={}; Path=/; Max-Age={}; HttpOnly; SameSite=Strict".format(
+                                    token, service.auth.session_seconds
+                                ),
+                            ),
+                        ),
+                    )
+                    return
+                if parts == ["api", "auth", "session"] and self.command == "GET":
+                    if session is None:
+                        self._send(200, {"authenticated": False})
+                    else:
+                        self._send(
+                            200,
+                            {"authenticated": True, "csrf_token": session["csrf"]},
+                        )
+                    return
+                if parsed.path.startswith("/api/") and session is None:
+                    self._send(401, {"error": "authentication required"})
+                    return
+                if (
+                    parsed.path.startswith("/api/")
+                    and self.command not in ("GET", "HEAD")
+                    and not service.auth.validate_csrf(
+                        token, self.headers.get("X-CSRF-Token")
+                    )
+                ):
+                    self._send(403, {"error": "valid CSRF token required"})
+                    return
+                if parts == ["api", "auth", "logout"] and self.command == "POST":
+                    service.auth.logout(token)
+                    self._send(
+                        200,
+                        {"authenticated": False},
+                        (("Set-Cookie", "dhcp_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict"),),
+                    )
+                    return
+
+                query = parse_qs(parsed.query)
+                params = {key: values[-1] for key, values in query.items() if values}
+                if params.get("client"):
+                    params["client"] = parse_mac(params["client"]).hex(":")
                 if parts == ["api", "stats"] and self.command == "GET":
                     leases = service.list_leases({})
                     capacity = (
@@ -539,6 +875,17 @@ class SIEMService:
                     params["limit"] = limit
                     events = service.events.search(params)
                     self._send(200, {"events": events, "count": len(events)})
+                    return
+                if parts == ["api", "search"] and self.command == "GET":
+                    if not params.get("expr"):
+                        raise ValueError("expr query parameter is required")
+                    limit = service._limit(params.get("limit"), 100)
+                    result = service.search_logs(
+                        params["expr"],
+                        source=params.get("source", "all"),
+                        limit=limit,
+                    )
+                    self._send(200, result)
                     return
                 if parts == ["api", "packets"] and self.command == "GET":
                     for field in ("source", "destination"):
@@ -582,6 +929,31 @@ class SIEMService:
                         self._send(201, {"rule": service.create_rule(self._body())})
                     else:
                         self._send(405, {"error": "method not allowed"})
+                    return
+                if parts == ["api", "backups"]:
+                    if self.command == "GET":
+                        self._send(
+                            200,
+                            {"backups": service.backups.list_snapshots()},
+                        )
+                    elif self.command == "POST":
+                        name = service.backups.create_snapshot("manual")
+                        self._send(201, {"backup": name})
+                    else:
+                        self._send(405, {"error": "method not allowed"})
+                    return
+                if (
+                    len(parts) == 4
+                    and parts[:2] == ["api", "backups"]
+                    and parts[3] == "restore"
+                ):
+                    if self.command != "POST":
+                        self._send(405, {"error": "method not allowed"})
+                        return
+                    self._send(
+                        200,
+                        service.restore_backup(parts[2]),
+                    )
                     return
                 if len(parts) == 3 and parts[:2] == ["api", "leases"]:
                     client = parse_mac(parts[2])
@@ -691,3 +1063,4 @@ class SIEMService:
             self.http_server.shutdown()
             self.http_server.server_close()
         self.scheduler.join(timeout=self.evaluation_interval + 1)
+        self.backups.close()

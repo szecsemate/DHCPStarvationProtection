@@ -17,7 +17,10 @@ main.py
        │         └─ dhcp_leases.json
        └─ SIEMService
             ├─ ThreadingHTTPServer ── dashboard.html + JSON API
-            ├─ scheduler thread ───── event/pool rules
+            ├─ scheduler thread ───── event/pool/expression rules
+            ├─ backup thread ──────── periodic integrity-checked snapshots
+            ├─ SessionAuth ────────── password, sessions, CSRF
+            ├─ BackupManager ──────── snapshots and lease/rule rollback
             ├─ siem_events.jsonl ──── lease lifecycle + alerts
             └─ dhcp_packets.jsonl ─── DHCP message metadata
 ```
@@ -26,7 +29,8 @@ main.py
 uses `LeaseManager` for address state. `SIEMService` attaches callbacks to the
 server and lease manager; it does not own DHCP allocation policy. The DHCP
 receive loop runs in the main thread. The HTTP server and rule scheduler run
-in separate daemon threads.
+in separate daemon threads. `SIEMService` also starts its own snapshot scheduler;
+it writes an initial checkpoint synchronously during service construction.
 
 ## 2. Configuration and startup order
 
@@ -57,8 +61,10 @@ Important network parameters:
   directory.
 
 The HTTP listener has its own `--http-bind-address`, independent of the DHCP
-socket. It defaults to all IPv4 interfaces and has no authentication, so
-firewall or interface restrictions are important.
+socket. It defaults to all IPv4 interfaces. Dashboard APIs require a single
+user session; the default credentials are `root`/`root` for initial setup and
+must be changed with `DHCP_DASHBOARD_PASSWORD`. The HTTP listener itself does
+not provide TLS, so restrict access or put it behind a trusted TLS proxy.
 
 ## 3. Wire representation and protocol helpers
 
@@ -72,6 +78,9 @@ firewall or interface restrictions are important.
 - `parse_options()` validates minimum packet size and cookie, walks options,
   handles PAD (0) and END (255), and rejects missing lengths/truncated values.
   Repeated options overwrite earlier occurrences.
+- Request processing currently supports Ethernet BOOTP client identifiers only:
+  `htype` must be Ethernet (1) and `hlen` must be six. Unsupported hardware
+  address formats are rejected before lease state is touched.
 - `encode_option()` writes an option tag, one-byte length, and value.
 - `Lease` holds an IPv4 address and a monotonic expiry deadline.
 - `parse_mac()` and `parse_reservation()` parse client IDs/reservation CLI
@@ -275,6 +284,9 @@ validation supports:
 
 - `event_rate`: event type, positive threshold, and positive time window.
 - `pool_usage`: threshold from 1 through 100 percent.
+- `expression`: a safe Boolean query over metrics or log records, evaluated
+  no more frequently than its configured `interval_seconds`; `count_if()`
+  can count matching records in a rolling time window.
 
 A daemon scheduler waits `evaluation_interval` seconds between evaluations.
 It reads lease events for event-rate rules and counts dynamic pool leases for
@@ -283,6 +295,23 @@ pool-usage rules. Triggered alerts are appended to the lease/SIEM event log.
 a rule remains triggered. Rules are saved through a same-directory temporary
 file and atomic replace. The built-in defaults trigger at 20 allocations in
 60 seconds and at 80 percent pool utilization.
+
+### Query expression language
+
+`dhcp.query` parses expressions with Python's AST module but validates and
+interprets an explicit subset; it never calls `eval()`. Supported syntax
+includes nested dictionary paths (`nested.field`), constant dictionary/list
+indexes (`record["field"]`), strings/numbers/booleans/null, `and`/`or`/`not`,
+comparisons (`==`, `!=`, `<`, `<=`, `>`, `>=`, `in`, `not in`), and bounded
+numeric `+`, `-`, `*`, `/`, `%`. `has("text")` searches the serialized record;
+`contains(field, "text")` searches stringified field values or container
+membership. Searches may select `all`, `events`, or `packets`.
+
+For scheduled rules, `count_if("event == 'lease_allocated'", 60) >= 10`
+compares the number of matching audit/packet records in the preceding 60
+seconds. Expressions have length, AST-size, nesting, literal, arithmetic
+result, and per-evaluation scan bounds. A search still scans the selected
+JSONL file to find matches, so large log files affect query latency.
 
 ## 9. HTTP API and dashboard
 
@@ -302,8 +331,13 @@ handles JSON routes. The dashboard is a static client and uses same-origin
 | `DELETE /api/leases/<mac>` | Revoke a lease, protect its address until old expiry, and prompt the client to renew. |
 | `GET /api/logs` | Search lease/SIEM events. |
 | `GET /api/packets` | Search packet metadata by `since`, `until`, `source`, `destination`, `mac`, `type`, and `limit`. |
+| `GET /api/search` | Evaluate a query expression over audit and/or packet records. |
+| `POST /api/auth/login` | Authenticate and issue an HttpOnly session cookie and CSRF token. |
+| `GET /api/auth/session`, `POST /api/auth/logout` | Inspect or end the current session. |
 | `GET/POST /api/rules` | List or create detection rules. |
 | `PATCH/PUT/DELETE /api/rules/<id>` | Update or delete a rule. |
+| `GET/POST /api/backups` | List verified snapshot manifests or create a manual snapshot. |
+| `POST /api/backups/<name>/restore` | Restore lease/rule state from a verified snapshot. |
 
 Packet API time bounds are inclusive ISO-8601 timestamps; timezone-naive
 values are treated as UTC. Source and destination filters are exact IPv4
@@ -313,12 +347,33 @@ type is validated against the supported DHCP names plus `MALFORMED` and
 preserve append order, with a maximum number of matching records returned;
 the dashboard reverses them for newest-first display.
 
-Request bodies are limited to 1 MiB and must be JSON objects. Error handling
+Request bodies are limited to 1 MiB and must be JSON objects. All `/api/`
+routes other than login and session inspection require an authenticated
+session; non-GET methods additionally require its CSRF token. Sessions expire
+after one hour and are held in memory, so restarting the process invalidates
+them. Failed login attempts are throttled per remote address. Error handling
 maps invalid values to 400, missing resources to 404, unsupported methods to
-405, and storage/network failures to 500. The HTTP service has no
-authentication/authorization and should only be exposed to trusted networks.
+405, unauthenticated requests to 401, CSRF failures to 403, and storage/network
+failures to 500. HTTP is still plaintext; authentication does not replace TLS.
 
-## 10. Diagnostics and implementation boundaries
+## 10. Backups and rollback
+
+`BackupManager` snapshots the lease state, rule file, audit log, and packet
+log as a ZIP archive. It records source paths, presence/size metadata, and
+SHA-256 digests in `manifest.json`. A checkpoint is written to a temporary
+file, flushed, and atomically renamed; a startup snapshot is created
+immediately, then the default interval is 1800 seconds and retention is 30
+days. `--backup-dir`, `--backup-interval`, and `--backup-retention-days`
+configure these values.
+
+Restore verifies the manifest, paths, and file hashes, validates lease/rule
+payloads before applying them, and creates a pre-rollback safety checkpoint.
+Only lease and SIEM rule state are replaced; the current audit and packet logs
+remain active. The in-memory lease/rule objects are reloaded after file
+replacement. A snapshot is a local recovery mechanism, not off-host disaster
+recovery or replication.
+
+## 11. Diagnostics and implementation boundaries
 
 For a failed client exchange, compare evidence from each layer:
 

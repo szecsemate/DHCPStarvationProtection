@@ -315,10 +315,10 @@ class DHCPServer:
             raise ValueError("packet is shorter than the BOOTP header")
         header = BOOTREQUEST.unpack(packet[: BOOTREQUEST.size])
         op, htype, hlen = header[:3]
-        if op != 1 or hlen == 0 or hlen > 16:
+        if op != 1:
             raise ValueError("unsupported BOOTP request")
-        if htype == 1 and hlen != 6:
-            raise ValueError("invalid Ethernet hardware address length")
+        if htype != 1 or hlen != 6:
+            raise ValueError("only six-byte Ethernet client addresses are supported")
         options = parse_options(packet)
         message = options.get(53)
         if message is None or len(message) != 1:

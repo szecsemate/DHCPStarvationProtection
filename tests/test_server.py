@@ -218,6 +218,18 @@ class DHCPServerTests(unittest.TestCase):
         self.server.handle_packet(request, self.socket)
         self.assertEqual(self.socket.sent, [])
 
+    def test_unsupported_bootp_hardware_address_is_rejected(self):
+        packet = bytearray(client_packet(1, CLIENT_ONE))
+        packet[1] = 6
+        with self.assertRaisesRegex(ValueError, "six-byte Ethernet"):
+            self.server.handle_packet(bytes(packet), self.socket)
+
+        packet = bytearray(client_packet(1, CLIENT_ONE))
+        packet[2] = 5
+        with self.assertRaisesRegex(ValueError, "six-byte Ethernet"):
+            self.server.handle_packet(bytes(packet), self.socket)
+        self.assertEqual(self.server.leases, {})
+
     def test_server_only_acknowledges_its_offered_address(self):
         unoffered_ip = ipaddress.IPv4Address("192.0.2.11")
         request = client_packet(

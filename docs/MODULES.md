@@ -19,6 +19,9 @@ main.py                  root launcher
         │     └── dhcp/leases.py
         │           └── dhcp/protocol.py
         └── dhcp/siem.py
+              ├── dhcp/auth.py
+              ├── dhcp/backups.py
+              ├── dhcp/query.py
               └── dhcp/protocol.py
 
 dhcp/dashboard.html      browser client for the HTTP API
@@ -26,21 +29,24 @@ dhcp/dashboard.html      browser client for the HTTP API
 tests/
   ├── test_cli.py        CLI defaults and independent bind/log settings
   ├── test_server.py     DHCP packet and lease behavior
-  └── test_siem.py       HTTP API, logs, and SIEM rules
+  └── test_siem.py       HTTP API, authentication, query, backups, and rules
 ```
 
 | File | Responsibility |
 | --- | --- |
 | [main.py](../main.py) | Root launcher that calls `dhcp.cli.main()`. |
 | [dhcp/cli.py](../dhcp/cli.py) | CLI options, object construction, service startup, and startup error reporting. |
+| [dhcp/auth.py](../dhcp/auth.py) | Single-user password verification, expiring sessions, CSRF validation, and login throttling. |
+| [dhcp/backups.py](../dhcp/backups.py) | Compressed integrity-checked snapshots, retention pruning, and protected state rollback. |
 | [dhcp/protocol.py](../dhcp/protocol.py) | BOOTP/DHCP constants, message names, lease data type, option parsing/encoding, and MAC/reservation parsing. |
+| [dhcp/query.py](../dhcp/query.py) | Bounded AST-based expression parsing and evaluation for log searches and rules; does not use Python `eval`. |
 | [dhcp/server.py](../dhcp/server.py) | DHCP configuration validation, UDP receive loop, message processing, reply encoding/routing, and packet callback. |
 | [dhcp/leases.py](../dhcp/leases.py) | Lease allocation/validation, reservations, release/decline/expiry, locking, and atomic JSON persistence. |
 | [dhcp/siem.py](../dhcp/siem.py) | HTTP API/dashboard host, lease/SIEM event log, separate DHCP packet log, and scheduled rules. |
 | [dhcp/dashboard.html](../dhcp/dashboard.html) | Browser UI for leases, lease/SIEM events, DHCP packet search, and rule administration. |
 | [tests/test_cli.py](../tests/test_cli.py) | CLI defaults and configuration parsing. |
 | [tests/test_server.py](../tests/test_server.py) | Synthetic DHCP packets and server/lease tests, including broadcast-interface binding. |
-| [tests/test_siem.py](../tests/test_siem.py) | HTTP endpoints, independent log search, and rule behavior. |
+| [tests/test_siem.py](../tests/test_siem.py) | HTTP endpoints, authentication, log query, backups, and rules. |
 
 ## Startup and shutdown
 
@@ -52,13 +58,14 @@ tests/
    network, pool, timers, and advertised options, then constructs
    `LeaseManager` and loads saved state.
 4. `main()` constructs `SIEMService`. It creates the two JSON-lines logs,
-   connects the lease and packet callbacks, loads/creates SIEM rules, and
-   starts the rule-scheduler thread.
+   connects the lease and packet callbacks, loads/creates SIEM rules, creates
+   an initial recovery snapshot, and starts the rule and backup scheduler
+   threads.
 5. `SIEMService.start_http()` starts the threaded HTTP server. The main thread
    then enters `DHCPServer.serve_forever()` and blocks in `recvfrom()`.
 6. Ctrl+C during the DHCP receive loop is handled as normal shutdown. The
    `finally` block in `main()` closes the HTTP server and stops/joins the
-   SIEM scheduler.
+   SIEM and backup schedulers.
 
 ## DHCP packet path
 
@@ -98,14 +105,28 @@ the DHCP exchange completed.
 - `JsonEventLog` appends timestamped JSONL records with in-process
   synchronization and `fsync`. The lease/SIEM log and packet log are separate
   instances/files.
+- `SessionAuth` verifies the configured single-user password using PBKDF2,
+  issues expiring in-memory sessions, validates CSRF tokens, and throttles
+  failed logins by remote address. The default `root`/`root` is for initial
+  setup only; set `DHCP_DASHBOARD_PASSWORD`.
 - `GET /api/packets` searches packet metadata by inclusive time bounds,
-  source/destination IPv4, client MAC, and DHCP type. Other API routes expose leases,
-  lease/SIEM events, stats, and rule management.
-- The SIEM scheduler evaluates event-rate and pool-usage rules, appending
-  alerts to the lease/SIEM event log. It does not block or rate-limit clients.
+  source/destination IPv4, client MAC, and DHCP type. Authenticated `/api`
+  routes also expose leases, logs, arbitrary-expression search, stats, rules,
+  and snapshot management.
+- `query.py` evaluates bounded Boolean, comparison, arithmetic, field-path,
+  `has()`, and `contains()` expressions over JSON records. Scheduled
+  expression rules also support rolling `count_if()` queries. This is a
+  deliberately small DSL, not executable Python.
+- `BackupManager` makes startup and periodic compressed snapshots of lease
+  state, rules, and both logs, verifies member hashes before restore, and
+  prunes archives by retention age. Manual restore replaces lease/rule state
+  only, keeps active logs intact, and snapshots the pre-rollback state first.
+- The SIEM scheduler evaluates event-rate, pool-usage, and expression rules,
+  appending alerts to the lease/SIEM event log. SIEM rules detect but do not
+  block or rate-limit DHCP clients.
 - The dashboard is served from the package-local `dashboard.html` and calls
-  the same-origin JSON API. It has no authentication; network access must be
-  restricted outside a trusted lab.
+  the same-origin authenticated JSON API. HTTP itself is unencrypted; use a
+  trusted network or TLS reverse proxy and restrict network exposure.
 
 ## Tests and dependencies
 

@@ -130,12 +130,18 @@ class LeaseManager:
 
     def load_state(self):
         """Load valid, unexpired leases and quarantines from the JSON state file."""
+        self.leases = {}
+        self.quarantined = {}
         try:
             with self.lease_file.open("r", encoding="utf-8") as state_file:
                 state = json.load(state_file)
         except FileNotFoundError:
             return
-        if not isinstance(state, dict) or state.get("version") != 1:
+        if (
+            not isinstance(state, dict)
+            or isinstance(state.get("version"), bool)
+            or state.get("version") != 1
+        ):
             raise ValueError("unsupported or invalid DHCP lease file format")
         if not isinstance(state.get("leases"), list) or not isinstance(
             state.get("quarantined"), list
@@ -147,11 +153,13 @@ class LeaseManager:
         loaded = {}
         used_addresses = set()
         for item in state["leases"]:
+            if not isinstance(item, dict):
+                raise ValueError("invalid entry in DHCP lease file")
             try:
                 client = bytes.fromhex(item["client"])
                 address = ipaddress.IPv4Address(item["address"])
                 remaining = float(item["expires_at"]) - now_wall
-            except (KeyError, TypeError, ValueError) as error:
+            except (KeyError, TypeError, ValueError, OverflowError) as error:
                 raise ValueError("invalid entry in DHCP lease file") from error
             if len(client) != 6 or remaining <= 0:
                 continue
@@ -180,10 +188,12 @@ class LeaseManager:
 
         quarantined = {}
         for item in state["quarantined"]:
+            if not isinstance(item, dict):
+                raise ValueError("invalid quarantine entry in DHCP lease file")
             try:
                 address = ipaddress.IPv4Address(item["address"])
                 remaining = float(item["expires_at"]) - now_wall
-            except (KeyError, TypeError, ValueError) as error:
+            except (KeyError, TypeError, ValueError, OverflowError) as error:
                 raise ValueError("invalid quarantine entry in DHCP lease file") from error
             if (
                 math.isfinite(remaining)

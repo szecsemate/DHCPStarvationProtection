@@ -26,6 +26,8 @@ class CommandLineTests(unittest.TestCase):
 
         self.assertEqual(args.http_bind_address, "0.0.0.0")
         self.assertEqual(args.dhcp_packet_log_file, "dhcp_packets.jsonl")
+        self.assertEqual(args.backup_interval, 1800)
+        self.assertEqual(args.backup_retention_days, 30)
 
     def test_http_bind_address_is_independent_from_dhcp_bind_address(self):
         with patch.object(
