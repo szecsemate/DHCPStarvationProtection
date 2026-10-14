@@ -62,6 +62,7 @@ class LeaseManager:
         self.quarantined = {}
         self.lock = threading.RLock()
         self.event_callback = None
+        self.allocation_guard = None
         if self.lease_file is not None:
             self.load_state()
 
@@ -257,6 +258,22 @@ class LeaseManager:
 
             used = {lease.address for lease in self.leases.values()}
             reserved = self.reservations.get(client)
+            occupied_count = sum(
+                int(self.pool_start) <= int(address) <= int(self.pool_end)
+                for address in used
+            )
+            if self.allocation_guard is not None and not self.allocation_guard(
+                client,
+                occupied_count,
+                reserved is not None,
+            ):
+                self._record_event(
+                    "lease_allocation_deferred",
+                    client=client.hex(":"),
+                    reason="protected_pool",
+                    pool_occupancy=occupied_count,
+                )
+                return None
             if reserved is not None:
                 if reserved in used or reserved in self.quarantined:
                     return None
@@ -283,18 +300,40 @@ class LeaseManager:
             )
             return address
 
-    def assign(self, client, address):
+    def assign(self, client, address, enforce_allocation_policy=False):
         """Validate and renew an address without conflicting with another lease."""
         with self.lock:
             self.expire()
             if not self._address_is_valid(client, address):
                 return False
+            previous = self.leases.get(client)
+            if (
+                previous is None
+                and enforce_allocation_policy
+                and self.allocation_guard is not None
+            ):
+                occupied_count = sum(
+                    int(self.pool_start) <= int(lease.address) <= int(self.pool_end)
+                    for lease in self.leases.values()
+                )
+                if not self.allocation_guard(
+                    client,
+                    occupied_count,
+                    client in self.reservations,
+                ):
+                    self._record_event(
+                        "lease_allocation_deferred",
+                        client=client.hex(":"),
+                        address=str(address),
+                        reason="protected_pool",
+                        pool_occupancy=occupied_count,
+                    )
+                    return False
             if any(
                 owner != client and lease.address == address
                 for owner, lease in self.leases.items()
             ):
                 return False
-            previous = self.leases.get(client)
             lease_seconds = (
                 previous.lease_seconds
                 if previous is not None and previous.lease_seconds is not None

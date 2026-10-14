@@ -17,17 +17,18 @@ main.py
        │         └─ dhcp_leases.json
        └─ SIEMService
             ├─ ThreadingHTTPServer ── dashboard.html + JSON API
-            ├─ scheduler thread ───── event/pool/expression rules
+            ├─ scheduler thread ───── event/pool/discovery/expression rules
             ├─ backup thread ──────── periodic integrity-checked snapshots
             ├─ SessionAuth ────────── password, sessions, CSRF
-            ├─ BackupManager ──────── snapshots and lease/rule rollback
+            ├─ BackupManager ──────── snapshots and lease/rule/trust rollback
+            ├─ TrustManager ──────── MAC profiles and protected-pool policy
             ├─ siem_events.jsonl ──── lease lifecycle + alerts
             └─ dhcp_packets.jsonl ─── DHCP message metadata
 ```
 
 `main()` is the composition root. `DHCPServer` owns protocol processing and
 uses `LeaseManager` for address state. `SIEMService` attaches callbacks to the
-server and lease manager; it does not own DHCP allocation policy. The DHCP
+server and lease manager, including the `TrustManager` allocation guard. The DHCP
 receive loop runs in the main thread. The HTTP server and rule scheduler run
 in separate daemon threads. `SIEMService` also starts its own snapshot scheduler;
 it writes an initial checkpoint synchronously during service construction.
@@ -59,6 +60,8 @@ Important network parameters:
   `dhcp_leases.json`, `siem_events.jsonl`, `siem_rules.json`, and
   `dhcp_packets.jsonl`. Relative paths are relative to the process working
   directory.
+- The trust profile path defaults to `dhcp_trust.json` and can be changed with
+  `--trust-file`.
 
 The HTTP listener has its own `--http-bind-address`, independent of the DHCP
 socket. It defaults to all IPv4 interfaces. Dashboard APIs require a single
@@ -134,6 +137,35 @@ If the pool/reservation has no free address, the request is ignored and a pool
 exhaustion warning is logged. Allocation at DISCOVER time means a dashboard
 `lease_allocated` record is not proof an OFFER was delivered or an ACK
 completed the exchange.
+
+### Trust evidence and pool defense
+
+After a well-formed DHCP packet with a supported DHCP message type has been
+parsed, the server calls `client_presence_callback`. `TrustManager.observe()`
+creates or updates a MAC profile and counts at most one sighting per UTC day.
+This callback runs before packet logging, so the received packet record
+contains the updated score and trusted status. A successful client-initiated
+renewal is specifically a DHCPREQUEST with nonzero `ciaddr` equal to the
+client's existing lease address. Renewal evidence is recorded only after
+`sendto()` returns after the ACK.
+
+Automatic score is
+`min(100, 10 * successful_renewals + 2 * sighting_days)`. Dashboard manual
+scores from 0 through 100 override that value until cleared. The policy
+defaults to an 80% untrusted occupancy ceiling and a trusted cutoff of 60;
+both are persisted with the profiles. The occupancy cap is the integer floor
+of pool capacity times threshold percentage, with at least one untrusted
+allocation allowed when the threshold is nonzero and the pool has capacity. A
+zero threshold permits no new untrusted dynamic allocation.
+
+`LeaseManager.allocate()` counts occupied addresses inside the dynamic pool
+before assigning a new address. At or above the cap, an untrusted client is
+deferred and a `lease_allocation_deferred` event is emitted. Configured
+reservations and trusted profiles bypass this cap but still require an
+eligible free address. Existing leases are returned before the guard and are
+not revoked. DHCPREQUEST assignment for an unleased client applies the same
+guard. This policy preserves capacity but cannot identify a client whose MAC
+address has been spoofed.
 
 ### DHCPREQUEST
 
@@ -287,14 +319,23 @@ validation supports:
 - `expression`: a safe Boolean query over metrics or log records, evaluated
   no more frequently than its configured `interval_seconds`; `count_if()`
   can count matching records in a rolling time window.
+- `unique_client_rate`: number of unique MAC addresses among DHCPDISCOVER
+  packets in a rolling window.
+- `per_client_rate`: highest DHCPDISCOVER count from one MAC in a rolling
+  window.
+- `low_trust_discover_rate`: number of DHCPDISCOVER packets whose recorded
+  trust score is at or below `max_score`.
 
 A daemon scheduler waits `evaluation_interval` seconds between evaluations.
-It reads lease events for event-rate rules and counts dynamic pool leases for
-pool-usage rules. Triggered alerts are appended to the lease/SIEM event log.
+It reads lease events for event-rate rules, counts dynamic pool leases for
+pool-usage rules, and scans at most 100,000 packet records for discovery-rate
+rules. Triggered alerts are appended to the lease/SIEM event log.
 `_last_triggered` suppresses repeated alerts for one evaluation interval while
 a rule remains triggered. Rules are saved through a same-directory temporary
 file and atomic replace. The built-in defaults trigger at 20 allocations in
-60 seconds and at 80 percent pool utilization.
+60 seconds, 10 unique DISCOVER clients in 60 seconds, 20 DISCOVER packets from
+one client in 60 seconds, 20 low-trust DISCOVER packets in 60 seconds, 5
+protected-pool denials in 60 seconds, and at 80 percent pool utilization.
 
 ### Query expression language
 
@@ -331,13 +372,17 @@ handles JSON routes. The dashboard is a static client and uses same-origin
 | `DELETE /api/leases/<mac>` | Revoke a lease, protect its address until old expiry, and prompt the client to renew. |
 | `GET /api/logs` | Search lease/SIEM events. |
 | `GET /api/packets` | Search packet metadata by `since`, `until`, `source`, `destination`, `mac`, `type`, and `limit`. |
+| `GET /api/trust/policy` | Read trust cutoffs, pool occupancy, and profile count. |
+| `PATCH /api/trust/policy` | Update the trusted-score cutoff or untrusted occupancy ceiling. |
+| `GET /api/trust/clients` | Search/list persisted client trust profiles. |
+| `GET/PATCH/DELETE /api/trust/clients/<mac>` | Read a profile, set/reset a manual score, or remove the profile. |
 | `GET /api/search` | Evaluate a query expression over audit and/or packet records. |
 | `POST /api/auth/login` | Authenticate and issue an HttpOnly session cookie and CSRF token. |
 | `GET /api/auth/session`, `POST /api/auth/logout` | Inspect or end the current session. |
 | `GET/POST /api/rules` | List or create detection rules. |
 | `PATCH/PUT/DELETE /api/rules/<id>` | Update or delete a rule. |
 | `GET/POST /api/backups` | List verified snapshot manifests or create a manual snapshot. |
-| `POST /api/backups/<name>/restore` | Restore lease/rule state from a verified snapshot. |
+| `POST /api/backups/<name>/restore` | Restore lease/rule/trust state from a verified snapshot. |
 
 Packet API time bounds are inclusive ISO-8601 timestamps; timezone-naive
 values are treated as UTC. Source and destination filters are exact IPv4
@@ -358,8 +403,8 @@ failures to 500. HTTP is still plaintext; authentication does not replace TLS.
 
 ## 10. Backups and rollback
 
-`BackupManager` snapshots the lease state, rule file, audit log, and packet
-log as a ZIP archive. It records source paths, presence/size metadata, and
+`BackupManager` snapshots the lease state, trust registry, rule file, audit
+log, and packet log as a ZIP archive. It records source paths, presence/size metadata, and
 SHA-256 digests in `manifest.json`. A checkpoint is written to a temporary
 file, flushed, and atomically renamed; a startup snapshot is created
 immediately, then the default interval is 1800 seconds and retention is 30

@@ -22,6 +22,7 @@ main.py                  root launcher
               ├── dhcp/auth.py
               ├── dhcp/backups.py
               ├── dhcp/query.py
+              ├── dhcp/trust.py
               └── dhcp/protocol.py
 
 dhcp/dashboard.html      browser client for the HTTP API
@@ -29,7 +30,8 @@ dhcp/dashboard.html      browser client for the HTTP API
 tests/
   ├── test_cli.py        CLI defaults and independent bind/log settings
   ├── test_server.py     DHCP packet and lease behavior
-  └── test_siem.py       HTTP API, authentication, query, backups, and rules
+  ├── test_trust.py      MAC trust scoring and protected-pool allocation
+  └── test_siem.py       HTTP API, authentication, trust, query, backups, and rules
 ```
 
 | File | Responsibility |
@@ -38,15 +40,17 @@ tests/
 | [dhcp/cli.py](../dhcp/cli.py) | CLI options, object construction, service startup, and startup error reporting. |
 | [dhcp/auth.py](../dhcp/auth.py) | Single-user password verification, expiring sessions, CSRF validation, and login throttling. |
 | [dhcp/backups.py](../dhcp/backups.py) | Compressed integrity-checked snapshots, retention pruning, and protected state rollback. |
+| [dhcp/trust.py](../dhcp/trust.py) | Persistent MAC trust profiles, automatic/manual scores, policy thresholds, and protected-pool allocation decisions. |
 | [dhcp/protocol.py](../dhcp/protocol.py) | BOOTP/DHCP constants, message names, lease data type, option parsing/encoding, and MAC/reservation parsing. |
 | [dhcp/query.py](../dhcp/query.py) | Bounded AST-based expression parsing and evaluation for log searches and rules; does not use Python `eval`. |
 | [dhcp/server.py](../dhcp/server.py) | DHCP configuration validation, UDP receive loop, message processing, reply encoding/routing, and packet callback. |
 | [dhcp/leases.py](../dhcp/leases.py) | Lease allocation/validation, reservations, release/decline/expiry, locking, and atomic JSON persistence. |
-| [dhcp/siem.py](../dhcp/siem.py) | HTTP API/dashboard host, lease/SIEM event log, separate DHCP packet log, and scheduled rules. |
-| [dhcp/dashboard.html](../dhcp/dashboard.html) | Browser UI for leases, lease/SIEM events, DHCP packet search, and rule administration. |
+| [dhcp/siem.py](../dhcp/siem.py) | HTTP API/dashboard host, lease/SIEM event log, separate DHCP packet log, trust controls, backups, and scheduled rules. |
+| [dhcp/dashboard.html](../dhcp/dashboard.html) | Browser UI for leases, client trust, lease/SIEM events, DHCP packet search, and rule administration. |
 | [tests/test_cli.py](../tests/test_cli.py) | CLI defaults and configuration parsing. |
 | [tests/test_server.py](../tests/test_server.py) | Synthetic DHCP packets and server/lease tests, including broadcast-interface binding. |
-| [tests/test_siem.py](../tests/test_siem.py) | HTTP endpoints, authentication, log query, backups, and rules. |
+| [tests/test_trust.py](../tests/test_trust.py) | Trust scoring, persistence, write-failure rollback, reservations, and protected-pool allocation. |
+| [tests/test_siem.py](../tests/test_siem.py) | HTTP endpoints, authentication, trust controls, log query, backups, and rules. |
 
 ## Startup and shutdown
 
@@ -57,8 +61,9 @@ tests/
 3. `main()` constructs `DHCPServer`; its constructor validates the IPv4
    network, pool, timers, and advertised options, then constructs
    `LeaseManager` and loads saved state.
-4. `main()` constructs `SIEMService`. It creates the two JSON-lines logs,
-   connects the lease and packet callbacks, loads/creates SIEM rules, creates
+4. `main()` constructs `SIEMService`. It creates the JSON-lines logs, loads
+   the persistent MAC trust registry, connects lease, packet, presence,
+   renewal, and allocation-policy callbacks, loads/creates SIEM rules, creates
    an initial recovery snapshot, and starts the rule and backup scheduler
    threads.
 5. `SIEMService.start_http()` starts the threaded HTTP server. The main thread
@@ -118,12 +123,20 @@ the DHCP exchange completed.
   expression rules also support rolling `count_if()` queries. This is a
   deliberately small DSL, not executable Python.
 - `BackupManager` makes startup and periodic compressed snapshots of lease
-  state, rules, and both logs, verifies member hashes before restore, and
-  prunes archives by retention age. Manual restore replaces lease/rule state
-  only, keeps active logs intact, and snapshots the pre-rollback state first.
-- The SIEM scheduler evaluates event-rate, pool-usage, and expression rules,
-  appending alerts to the lease/SIEM event log. SIEM rules detect but do not
-  block or rate-limit DHCP clients.
+  state, trust state, rules, and both logs, verifies member hashes before
+  restore, and prunes archives by retention age. Manual restore replaces
+  lease/rule/trust state, keeps active logs intact, and snapshots the
+  pre-rollback state first.
+- `TrustManager` persists per-MAC trust evidence. Its score is
+  `min(100, 10 * successful_acknowledged_renewals + 2 *
+  distinct_UTC_sighting_days)`, with a persistent manual override. At the
+  configurable occupancy ceiling, `LeaseManager` defers new dynamic
+  allocations to untrusted clients while allowing trusted clients and
+  reservations to use remaining eligible addresses; existing leases remain.
+- The SIEM scheduler evaluates event-rate, pool-usage, expression, unique
+  DISCOVER-client, per-client DISCOVER-burst, low-trust DISCOVER, and protected
+  pool-deferral rules. These rules emit alerts; the separate trust-aware
+  allocation policy preserves pool capacity.
 - The dashboard is served from the package-local `dashboard.html` and calls
   the same-origin authenticated JSON API. HTTP itself is unencrypted; use a
   trusted network or TLS reverse proxy and restrict network exposure.

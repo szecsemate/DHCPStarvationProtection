@@ -101,6 +101,8 @@ class DHCPServer:
             )
         self.interface = interface
         self.packet_callback = None
+        self.client_presence_callback = None
+        self.client_renewal_callback = None
         self._socket = None
         self._socket_lock = threading.Lock()
         self.lease_manager = LeaseManager(
@@ -132,9 +134,13 @@ class DHCPServer:
         """Allocate an address through the lease manager."""
         return self.lease_manager.allocate(client)
 
-    def assign_address(self, client, address):
+    def assign_address(self, client, address, enforce_allocation_policy=False):
         """Assign or renew an address through the lease manager."""
-        return self.lease_manager.assign(client, address)
+        return self.lease_manager.assign(
+            client,
+            address,
+            enforce_allocation_policy=enforce_allocation_policy,
+        )
 
     def build_reply(self, header, message_type, address=None, lease_seconds=None):
         """Encode a BOOTP reply and the options advertised by this server."""
@@ -296,6 +302,44 @@ class DHCPServer:
             packet_header = BOOTREQUEST.unpack(packet[: BOOTREQUEST.size])
             if packet_header[1] == 1 and packet_header[2] == 6:
                 client_mac = packet_header[11][:6].hex(":")
+        try:
+            if len(packet) < BOOTREQUEST.size:
+                raise ValueError("packet is shorter than the BOOTP header")
+            header = BOOTREQUEST.unpack(packet[: BOOTREQUEST.size])
+            op, htype, hlen = header[:3]
+            if op != 1:
+                raise ValueError("unsupported BOOTP request")
+            if htype != 1 or hlen != 6:
+                raise ValueError("only six-byte Ethernet client addresses are supported")
+            options = parse_options(packet)
+            message = options.get(53)
+            if message is None or len(message) != 1:
+                raise ValueError("missing or invalid DHCP message type")
+        except (ValueError, struct.error):
+            LOG.info(
+                "Received %s from %s:%d on %s:%d",
+                packet_type,
+                source_address[0],
+                source_address[1],
+                destination_address[0],
+                destination_address[1],
+            )
+            self._log_packet(
+                "received",
+                packet_type,
+                source_address,
+                destination_address,
+                client_mac,
+            )
+            raise
+
+        client = header[11][:hlen]
+        message_type = message[0]
+        if (
+            message_type in DHCP_MESSAGE_TYPES
+            and self.client_presence_callback is not None
+        ):
+            self.client_presence_callback(client)
         LOG.info(
             "Received %s from %s:%d on %s:%d",
             packet_type,
@@ -311,23 +355,9 @@ class DHCPServer:
             destination_address,
             client_mac,
         )
-        if len(packet) < BOOTREQUEST.size:
-            raise ValueError("packet is shorter than the BOOTP header")
-        header = BOOTREQUEST.unpack(packet[: BOOTREQUEST.size])
-        op, htype, hlen = header[:3]
-        if op != 1:
-            raise ValueError("unsupported BOOTP request")
-        if htype != 1 or hlen != 6:
-            raise ValueError("only six-byte Ethernet client addresses are supported")
-        options = parse_options(packet)
-        message = options.get(53)
-        if message is None or len(message) != 1:
-            raise ValueError("missing or invalid DHCP message type")
-
-        client = header[11][:hlen]
-        message_type = message[0]
         response = None
         response_type = None
+        renewal_client = None
         with self.lease_manager.lock:
             if message_type == DHCP_DISCOVER:
                 address = self.allocate_address(client)
@@ -347,7 +377,13 @@ class DHCPServer:
                 if requested is not None and len(requested) != 4:
                     raise ValueError("invalid requested IP address option")
 
+                self.lease_manager.expire()
                 current = self.leases.get(client)
+                is_client_renewal = (
+                    header[7] != ZERO_IP
+                    and current is not None
+                    and ipaddress.IPv4Address(header[7]) == current.address
+                )
                 if requested is not None:
                     address = ipaddress.IPv4Address(requested)
                     # Selecting this server or renewing with ciaddr must match
@@ -367,8 +403,14 @@ class DHCPServer:
                 else:
                     address = current.address if current is not None else None
 
-                if self.assign_address(client, address):
+                if self.assign_address(
+                    client,
+                    address,
+                    enforce_allocation_policy=current is None,
+                ):
                     response_type = DHCP_ACK
+                    if is_client_renewal:
+                        renewal_client = client
                     lease = self.leases.get(client)
                     lease_seconds = (
                         lease.lease_seconds
@@ -416,6 +458,8 @@ class DHCPServer:
             response_destination[1],
         )
         sent_bytes = sock.sendto(response, response_destination)
+        if renewal_client is not None and self.client_renewal_callback is not None:
+            self.client_renewal_callback(renewal_client)
         LOG.info(
             "Sent %s (%d bytes) to %s:%d",
             DHCP_MESSAGE_TYPES[response_type],

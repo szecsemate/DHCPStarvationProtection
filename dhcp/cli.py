@@ -67,6 +67,11 @@ def parse_args():
         help="JSON file used to persist SIEM rules",
     )
     parser.add_argument(
+        "--trust-file",
+        default="dhcp_trust.json",
+        help="JSON file used to persist DHCP client trust profiles and policy",
+    )
+    parser.add_argument(
         "--siem-interval",
         type=int,
         default=10,
@@ -124,6 +129,7 @@ def main():
             backup_dir=args.backup_dir,
             backup_interval=args.backup_interval,
             backup_retention_days=args.backup_retention_days,
+            trust_file=args.trust_file,
         )
         try:
             siem.start_http(args.http_bind_address, args.http_port)

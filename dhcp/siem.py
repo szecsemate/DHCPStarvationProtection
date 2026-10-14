@@ -22,6 +22,7 @@ from .backups import BackupError, BackupManager
 from .leases import LeaseManager
 from .protocol import DHCP_MESSAGE_TYPES, parse_mac
 from .query import QueryError, compile_expression
+from .trust import TrustManager
 
 LOG = logging.getLogger("dhcp-siem")
 
@@ -38,6 +39,7 @@ EVENT_TYPES = {
     "lease_released",
     "lease_declined",
     "lease_expired",
+    "lease_allocation_deferred",
     "siem_alert",
 }
 DEFAULT_RULES = [
@@ -55,6 +57,40 @@ DEFAULT_RULES = [
         "name": "High DHCP address-pool usage",
         "type": "pool_usage",
         "threshold_percent": 80,
+        "enabled": True,
+    },
+    {
+        "id": "unique-discover-churn",
+        "name": "Rapid discovery from unique clients",
+        "type": "unique_client_rate",
+        "threshold": 10,
+        "window_seconds": 60,
+        "enabled": True,
+    },
+    {
+        "id": "per-client-discover-burst",
+        "name": "Repeated discovery burst from one client",
+        "type": "per_client_rate",
+        "threshold": 20,
+        "window_seconds": 60,
+        "enabled": True,
+    },
+    {
+        "id": "low-trust-discover-pressure",
+        "name": "Low-trust DHCP discovery pressure",
+        "type": "low_trust_discover_rate",
+        "max_score": 30,
+        "threshold": 20,
+        "window_seconds": 60,
+        "enabled": True,
+    },
+    {
+        "id": "protected-pool-denials",
+        "name": "Protected-pool allocation denials",
+        "type": "event_rate",
+        "event_type": "lease_allocation_deferred",
+        "threshold": 5,
+        "window_seconds": 60,
         "enabled": True,
     },
 ]
@@ -203,6 +239,7 @@ class SIEMService:
         backup_interval=1800,
         backup_retention_days=30,
         dashboard_password=None,
+        trust_file: Union[str, os.PathLike] = "dhcp_trust.json",
     ):
         if evaluation_interval < 1:
             raise ValueError("rule evaluation interval must be at least one second")
@@ -216,13 +253,23 @@ class SIEMService:
         self.rules = self._load_rules()
         self._last_triggered = {}
         self._last_evaluated = {}
+        self.trust = TrustManager(
+            trust_file,
+            self.dhcp_server.pool_start,
+            self.dhcp_server.pool_end,
+        )
         self.auth = SessionAuth(
             password=dashboard_password
             if dashboard_password is not None
             else os.environ.get("DHCP_DASHBOARD_PASSWORD", "root")
         )
         self.dhcp_server.lease_manager.event_callback = self.record_event
+        self.dhcp_server.lease_manager.allocation_guard = (
+            self.trust.allow_new_dynamic_lease
+        )
         self.dhcp_server.packet_callback = self.record_packet
+        self.dhcp_server.client_presence_callback = self.trust.observe
+        self.dhcp_server.client_renewal_callback = self.trust.record_renewal
         self.http_server = None
         lease_file = self.dhcp_server.lease_manager.lease_file
         if lease_file is None:
@@ -232,6 +279,7 @@ class SIEMService:
             {
                 "lease_state": (lease_file, self.dhcp_server.lease_manager.lock),
                 "rules": (self.rules_file, self.lock),
+                "trust_state": (self.trust.path, self.trust.lock),
                 "audit_log": (self.events.path, self.events.lock),
                 "packet_log": (self.packets.path, self.packets.lock),
             },
@@ -247,6 +295,17 @@ class SIEMService:
         return self.events.append(event_type, **fields)
 
     def record_packet(self, **fields):
+        client_mac = fields.get("client_mac")
+        if client_mac:
+            profile = self.trust.get_profile(client_mac)
+            fields.update(
+                {
+                    "trust_score": profile["score"],
+                    "automatic_trust_score": profile["automatic_score"],
+                    "trust_score_source": profile["score_source"],
+                    "trusted": profile["trusted"],
+                }
+            )
         return self.packets.append("dhcp_packet", **fields)
 
     def _load_rules(self):
@@ -268,6 +327,21 @@ class SIEMService:
         identifiers = [rule["id"] for rule in validated]
         if len(identifiers) != len(set(identifiers)):
             raise ValueError("SIEM rules file contains duplicate rule IDs")
+        builtin_version = state.get("builtin_version", 0)
+        if (
+            isinstance(builtin_version, bool)
+            or not isinstance(builtin_version, int)
+            or builtin_version not in (0, 1)
+        ):
+            raise ValueError("unsupported SIEM built-in rule version")
+        if builtin_version < 1:
+            existing = {rule["id"] for rule in validated}
+            validated.extend(
+                dict(rule)
+                for rule in DEFAULT_RULES
+                if rule["id"] not in existing
+            )
+            self._save_rules(validated)
         return validated
 
     def _save_rules(self, rules):
@@ -283,7 +357,11 @@ class SIEMService:
                 delete=False,
             ) as rules_file:
                 temp_path = Path(rules_file.name)
-                json.dump({"version": 1, "rules": rules}, rules_file, indent=2)
+                json.dump(
+                    {"version": 1, "builtin_version": 1, "rules": rules},
+                    rules_file,
+                    indent=2,
+                )
                 rules_file.write("\n")
                 rules_file.flush()
                 os.fsync(rules_file.fileno())
@@ -355,8 +433,47 @@ class SIEMService:
                 "interval_seconds": interval,
                 "enabled": rule.get("enabled", True),
             }
+        elif rule_type in (
+            "unique_client_rate",
+            "per_client_rate",
+            "low_trust_discover_rate",
+        ):
+            threshold = rule.get("threshold")
+            window = rule.get("window_seconds")
+            if (
+                isinstance(threshold, bool)
+                or not isinstance(threshold, int)
+                or threshold < 1
+            ):
+                raise ValueError("threshold must be a positive integer")
+            if (
+                isinstance(window, bool)
+                or not isinstance(window, int)
+                or not 1 <= window <= 30 * 24 * 60 * 60
+            ):
+                raise ValueError("window_seconds must be between 1 and 2592000")
+            result = {
+                "id": str(rule.get("id") or uuid.uuid4()),
+                "name": str(rule.get("name") or "DHCP discovery rate rule"),
+                "type": rule_type,
+                "threshold": threshold,
+                "window_seconds": window,
+                "enabled": rule.get("enabled", True),
+            }
+            if rule_type == "low_trust_discover_rate":
+                max_score = rule.get("max_score", 30)
+                if (
+                    isinstance(max_score, bool)
+                    or not isinstance(max_score, int)
+                    or not 0 <= max_score <= 100
+                ):
+                    raise ValueError("max_score must be from 0 to 100")
+                result["max_score"] = max_score
         else:
-            raise ValueError("rule type must be event_rate, pool_usage, or expression")
+            raise ValueError(
+                "unsupported rule type; expected event_rate, pool_usage, expression, "
+                "unique_client_rate, per_client_rate, or low_trust_discover_rate"
+            )
         if not isinstance(result["enabled"], bool):
             raise ValueError("enabled must be a boolean")
         if (
@@ -441,6 +558,12 @@ class SIEMService:
     def rules_snapshot(self):
         with self.lock:
             return [dict(rule) for rule in self.rules]
+
+    def trust_profiles(self, query=None, limit=1000):
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+            raise ValueError("limit must be between 1 and 1000")
+        profiles = self.trust.list_profiles(query=query, limit=limit)
+        return {"profiles": profiles, "count": len(profiles)}
 
     def create_rule(self, rule):
         validated = self._validate_rule(rule)
@@ -535,6 +658,44 @@ class SIEMService:
                     count += 1
         return count
 
+    def _discover_activity(self, window_seconds, max_score=None, now=None):
+        cutoff = (time.time() if now is None else now) - window_seconds
+        by_client = {}
+        scanned = 0
+        for record in self.packets.iter_records():
+            scanned += 1
+            if scanned > 100000:
+                raise QueryError("discovery rule scan exceeded 100000 packet records")
+            if record.get("packet_type") != "DHCPDISCOVER":
+                continue
+            client_mac = record.get("client_mac")
+            if not isinstance(client_mac, str):
+                continue
+            try:
+                timestamp = _parse_timestamp(
+                    record.get("timestamp", ""), "packet timestamp"
+                ).timestamp()
+            except ValueError as error:
+                raise EventLogError(
+                    "packet record has an invalid timestamp"
+                ) from error
+            if timestamp < cutoff:
+                continue
+            score = record.get("trust_score", 0)
+            if (
+                max_score is not None
+                and (isinstance(score, bool) or not isinstance(score, int)
+                     or score > max_score)
+            ):
+                continue
+            normalized_mac = client_mac.lower()
+            by_client[normalized_mac] = by_client.get(normalized_mac, 0) + 1
+        return {
+            "unique_clients": len(by_client),
+            "discoveries": sum(by_client.values()),
+            "max_per_client": max(by_client.values(), default=0),
+        }
+
     def evaluate_rules(self):
         now = time.time()
         leases = self.list_leases({})
@@ -621,6 +782,33 @@ class SIEMService:
                 detail = "{} {} events in {} seconds".format(
                     count, rule["event_type"], rule["window_seconds"]
                 )
+            elif rule["type"] in (
+                "unique_client_rate",
+                "per_client_rate",
+                "low_trust_discover_rate",
+            ):
+                activity = self._discover_activity(
+                    rule["window_seconds"],
+                    max_score=(
+                        rule["max_score"]
+                        if rule["type"] == "low_trust_discover_rate"
+                        else None
+                    ),
+                    now=now,
+                )
+                if rule["type"] == "unique_client_rate":
+                    observed = activity["unique_clients"]
+                    label = "unique clients"
+                elif rule["type"] == "per_client_rate":
+                    observed = activity["max_per_client"]
+                    label = "DISCOVER packets from one client"
+                else:
+                    observed = activity["discoveries"]
+                    label = "low-trust DISCOVER packets"
+                triggered = observed >= rule["threshold"]
+                detail = "{} {} in {} seconds".format(
+                    observed, label, rule["window_seconds"]
+                )
             else:
                 triggered = pool_usage >= rule["threshold_percent"]
                 detail = "address pool is {:.1f}% utilized".format(pool_usage)
@@ -640,7 +828,12 @@ class SIEMService:
                     rule_name=rule["name"],
                     severity=(
                         "high"
-                        if rule["type"] == "event_rate"
+                        if rule["type"]
+                        in (
+                            "event_rate",
+                            "per_client_rate",
+                            "low_trust_discover_rate",
+                        )
                         else "medium"
                     ),
                     details=detail,
@@ -699,6 +892,21 @@ class SIEMService:
             identifiers = [rule["id"] for rule in rules]
             if len(identifiers) != len(set(identifiers)):
                 raise BackupError("backup SIEM rules contain duplicate IDs")
+        trust_data = payloads.get("trust_state")
+        if trust_data is not None:
+            try:
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    trust_path = Path(temp_dir) / "trust.json"
+                    trust_path.write_bytes(trust_data)
+                    TrustManager(
+                        trust_path,
+                        manager.pool_start,
+                        manager.pool_end,
+                    )
+            except (OSError, ValueError) as error:
+                raise BackupError(
+                    "backup DHCP trust profiles are invalid: {}".format(error)
+                ) from error
 
     def restore_backup(self, filename):
         """Restore lease/rule state from a verified checkpoint, retaining logs."""
@@ -707,6 +915,7 @@ class SIEMService:
             manager.leases.clear()
             manager.quarantined.clear()
             manager.load_state()
+            self.trust.load()
             with self.lock:
                 self.rules = self._load_rules()
                 self._last_evaluated.clear()
@@ -886,6 +1095,88 @@ class SIEMService:
                         limit=limit,
                     )
                     self._send(200, result)
+                    return
+                if parts == ["api", "trust", "policy"]:
+                    if self.command == "GET":
+                        policy = service.trust.policy_snapshot()
+                        active_leases = service.list_leases({})
+                        occupied = sum(
+                            int(service.dhcp_server.pool_start)
+                            <= int(ipaddress.IPv4Address(lease["address"]))
+                            <= int(service.dhcp_server.pool_end)
+                            for lease in active_leases
+                        )
+                        untrusted_limit = (
+                            service.trust.untrusted_allocation_limit()
+                        )
+                        self._send(
+                            200,
+                            {
+                                **policy,
+                                "pool_capacity": service.trust.pool_capacity,
+                                "active_pool_addresses": occupied,
+                                "untrusted_allocation_limit": untrusted_limit,
+                                "protected_addresses": (
+                                    service.trust.pool_capacity - untrusted_limit
+                                ),
+                                "profiles_count": service.trust.profile_count(),
+                            },
+                        )
+                    elif self.command in ("PUT", "PATCH"):
+                        policy = service.trust.configure_policy(self._body())
+                        self._send(200, policy)
+                    else:
+                        self._send(405, {"error": "method not allowed"})
+                    return
+                if parts == ["api", "trust", "clients"] and self.command == "GET":
+                    limit = service._limit(params.get("limit"), 1000)
+                    result = service.trust_profiles(
+                        query=params.get("q"),
+                        limit=limit,
+                    )
+                    self._send(200, result)
+                    return
+                if (
+                    len(parts) == 4
+                    and parts[:3] == ["api", "trust", "clients"]
+                ):
+                    try:
+                        client = parse_mac(parts[3])
+                    except ValueError as error:
+                        raise ValueError("client must be a valid six-byte MAC address") from error
+                    normalized_mac = client.hex(":")
+                    if self.command == "GET":
+                        if not service.trust.has_profile(client):
+                            raise KeyError("client trust profile not found")
+                        self._send(
+                            200,
+                            {"profile": service.trust.get_profile(client)},
+                        )
+                    elif self.command == "PATCH":
+                        changes = self._body()
+                        clear_override = changes.get("clear_override", False)
+                        if not isinstance(clear_override, bool):
+                            raise ValueError("clear_override must be a boolean")
+                        if clear_override:
+                            if "manual_score" in changes:
+                                raise ValueError(
+                                    "manual_score cannot be combined with clear_override"
+                                )
+                            profile = service.trust.clear_manual_score(client)
+                        elif "manual_score" in changes and len(changes) == 1:
+                            profile = service.trust.set_manual_score(
+                                client, changes["manual_score"]
+                            )
+                        else:
+                            raise ValueError(
+                                "provide manual_score or clear_override=true"
+                            )
+                        self._send(200, {"profile": profile})
+                    elif self.command == "DELETE":
+                        service.trust.remove_profile(client)
+                        self._send(200, {"removed": True, "mac": normalized_mac})
+                    else:
+                        self._send(405, {"error": "method not allowed"})
                     return
                 if parts == ["api", "packets"] and self.command == "GET":
                     for field in ("source", "destination"):

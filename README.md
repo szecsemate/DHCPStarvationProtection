@@ -37,6 +37,7 @@ DHCPStarvationProtection/
 │   ├── protocol.py        DHCP packet constants and helpers
 │   ├── query.py           safe log-search and rule expression language
 │   ├── server.py          DHCP message handling and UDP socket
+│   ├── trust.py           MAC trust profiles and protected-pool policy
 │   └── siem.py            HTTP API, separate lease/packet logs, and SIEM rules
 ├── docs/
 │   ├── MODULES.md         module and function connections
@@ -45,6 +46,7 @@ DHCPStarvationProtection/
 ├── tests/
 │   ├── test_cli.py        CLI configuration tests
 │   ├── test_server.py     server and lease unit tests
+│   ├── test_trust.py      trust scoring and allocation policy tests
 │   └── test_siem.py       HTTP API and SIEM rule tests
 ├── main.py                root launcher
 └── README.md
@@ -187,12 +189,12 @@ Open `http://<http-interface-address>:8080/` in a browser while the server is
 running (for example, `http://10.0.0.5:8080/` for the example above). The
 dashboard provides an overview of active leases, pool utilization and alerts,
 searchable lease management (assign, renew, extend, release), searchable audit
-events, a separate searchable DHCP packet log, and SIEM rule creation,
-enable/disable, and deletion. Packet search filters support a time range,
-source IPv4 address, destination IPv4 address, and DHCP message type. The
-dashboard refreshes automatically every 10 seconds. Sign in with the configured
-dashboard credentials. The HTTP service binds to all IPv4 interfaces by
-default; restrict access with a firewall or bind it to a trusted
+events, a separate searchable DHCP packet log, Client Trust administration,
+and SIEM rule creation, enable/disable, and deletion. Packet search filters
+support a time range, source IPv4 address, destination IPv4 address, and DHCP
+message type. The dashboard refreshes automatically every 10 seconds. Sign in
+with the configured dashboard credentials. The HTTP service binds to all IPv4
+interfaces by default; restrict access with a firewall or bind it to a trusted
 interface/address. Use TLS through a trusted reverse proxy on networks where
 credentials must not travel in cleartext.
 
@@ -217,6 +219,9 @@ The site uses these JSON endpoints internally:
 | `DELETE /api/rules/<id>` | Delete a rule. |
 | `GET /api/backups`, `POST /api/backups` | List snapshots or create one immediately. |
 | `POST /api/backups/<name>/restore` | Restore lease/rule state from a verified snapshot; logs remain active. |
+| `GET /api/trust/policy`, `PATCH /api/trust/policy` | Read or update the trusted-pool occupancy ceiling and trust cutoff. |
+| `GET /api/trust/clients?q=<mac>&limit=<n>` | Search remembered MAC trust profiles. |
+| `GET/PATCH/DELETE /api/trust/clients/<mac>` | Read a profile, set/reset a manual score, or remove it. |
 | `GET /api/stats` | Get active lease count and address-pool utilization. |
 
 The root (`/`) serves the dashboard page; the JSON endpoints remain available
@@ -262,18 +267,41 @@ The existing `event_rate` form remains available:
 }
 ```
 
-The built-in starvation-oriented rules detect rapid allocations to many
-clients and high address-pool utilization. Triggered rules append `siem_alert`
-events to the searchable lease/SIEM JSON-lines log. The dashboard's Query view
-searches all fields in either log; `has("term")` searches an entire record.
-The query evaluator bounds expression complexity and record scans.
+Built-in starvation-oriented rules detect rapid allocations, unique-client
+DISCOVER churn, per-client DISCOVER bursts, low-trust DISCOVER pressure,
+protected-pool allocation deferrals, and high address-pool utilization.
+Triggered rules append `siem_alert` events to the searchable lease/SIEM
+JSON-lines log. The dashboard's Query view searches all fields in either log;
+`has("term")` searches an entire record. The query evaluator bounds expression
+complexity and record scans.
+
+### Client trust and starvation protection
+
+The trust registry remembers valid DHCP-seen Ethernet MAC addresses in
+`dhcp_trust.json` (or the path given by `--trust-file`). Automatic trust is
+`min(100, 10 × successful acknowledged client renewals + 2 × distinct UTC
+sighting days)`. A client contributes at most one sighting day per UTC day.
+Successful renewals count only when an ACK is sent for a DHCPREQUEST with
+`ciaddr` matching the client's existing lease. A dashboard-set manual score
+from 0–100 overrides automatic scoring until reset.
+
+By default, new untrusted dynamic allocations are deferred once 80% of the
+dynamic pool is occupied; the default trusted cutoff is 60. Both values are
+editable in Client Trust. Configured reservations and trusted MACs may use
+remaining eligible addresses after the ceiling is reached. Existing leases
+are not revoked, and no policy can allocate beyond actual free capacity. The
+policy is an allocation safeguard, not proof of client identity: MAC addresses
+can be spoofed, and DHCP starvation from trusted/spoofed identities still
+requires network-layer controls.
 
 ## Limitations
 
 - This is not a full implementation of every DHCP option or protocol edge case,
   and it does not support DHCPv6.
-- It does not enforce per-client request rate limits or quotas. SIEM alerts
-  are detection-only and do not block clients or mitigate starvation.
+- It does not implement general per-client request rate limits or quotas.
+  Starvation defense reserves a configurable share of the dynamic pool for
+  trusted clients and reservations; detection rules and trust scores are not
+  proof of identity and do not replace switch or network-layer controls.
 - Dashboard login is a single-user control, not a production identity system.
   The default `root`/`root` credentials must be changed. Sessions are held in
   memory and are lost on restart. HTTP does not encrypt credentials; use a TLS

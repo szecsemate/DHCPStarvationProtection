@@ -17,6 +17,7 @@ LOG = logging.getLogger("dhcp-backups")
 MANIFEST_NAME = "manifest.json"
 BACKUP_FORMAT_VERSION = 1
 MAX_BACKUP_MEMBER_BYTES = 2 * 1024 * 1024 * 1024
+OPTIONAL_BACKUP_SOURCES = {"trust_state"}
 
 
 class BackupError(ValueError):
@@ -49,7 +50,13 @@ class BackupManager:
 
     def _locked_sources(self):
         stack = ExitStack()
-        lock_order = ("lease_state", "audit_log", "packet_log", "rules")
+        lock_order = (
+            "lease_state",
+            "trust_state",
+            "audit_log",
+            "packet_log",
+            "rules",
+        )
         for name in lock_order:
             if name not in self.sources:
                 continue
@@ -147,6 +154,8 @@ class BackupManager:
                     ):
                         raise BackupError("backup integrity check failed for {}".format(name))
                     payloads[name] = data
+                for name in set(self.sources) - set(payloads):
+                    payloads[name] = None
                 return manifest, payloads
         except (OSError, zipfile.BadZipFile, KeyError, json.JSONDecodeError, UnicodeDecodeError) as error:
             raise BackupError("could not read backup: {}".format(error)) from error
@@ -189,8 +198,12 @@ class BackupManager:
                         or len(source["sha256"]) != 64
                     ):
                         raise BackupError("backup source manifest is invalid")
-                if set(manifest["sources"]) != set(self.sources):
-                    raise BackupError("backup does not contain all configured sources")
+                source_names = set(manifest["sources"])
+                if (
+                    source_names - set(self.sources)
+                    or (set(self.sources) - OPTIONAL_BACKUP_SOURCES) - source_names
+                ):
+                    raise BackupError("backup does not contain all required sources")
         except (OSError, zipfile.BadZipFile, KeyError, json.JSONDecodeError, UnicodeDecodeError) as error:
             raise BackupError("could not read backup: {}".format(error)) from error
         return manifest
@@ -228,7 +241,7 @@ class BackupManager:
     def restore_state(self, filename, validate=None, reload_state=None):
         """Restore only lease/rule files and retain logs, protecting current state."""
         manifest, payloads = self._read_snapshot(filename)
-        state_names = ("lease_state", "rules")
+        state_names = ("lease_state", "rules", "trust_state")
         for name in state_names:
             if name not in payloads:
                 raise BackupError("backup is missing {}".format(name))

@@ -192,6 +192,7 @@
       <div class="nav-label">Workspace</div>
       <button class="nav-link active" data-view="overview"><span class="nav-icon">◫</span><span class="nav-text">Overview</span></button>
       <button class="nav-link" data-view="leases"><span class="nav-icon">⌁</span><span class="nav-text">Leases</span></button>
+      <button class="nav-link" data-view="trust"><span class="nav-icon">◆</span><span class="nav-text">Client trust</span></button>
       <button class="nav-link" data-view="events"><span class="nav-icon">≋</span><span class="nav-text">Event log</span></button>
       <button class="nav-link" data-view="packets"><span class="nav-icon">⇄</span><span class="nav-text">DHCP packets</span></button>
       <button class="nav-link" data-view="query"><span class="nav-icon">⌕</span><span class="nav-text">Log query</span></button>
@@ -233,10 +234,30 @@
           </div>
         </section>
 
+        <section id="view-trust" class="section">
+          <div class="page-head"><div><div class="eyebrow">PROTECTION / CLIENT REPUTATION</div><h1>Client trust</h1><div class="subtitle">Review MAC reputation, adjust scores, and reserve remaining pool capacity for trusted clients.</div></div><button class="button" id="trust-refresh">↻ &nbsp;Refresh</button></div>
+          <div class="panel">
+            <div class="panel-head"><div><div class="panel-title">Protected-pool policy</div><div class="panel-meta" id="trust-policy-status">Loading policy…</div></div></div>
+            <form id="trust-policy-form" class="panel-body">
+              <div class="toolbar">
+                <label class="field">Untrusted occupancy ceiling (%)<input id="trust-occupancy" class="input" type="number" min="0" max="100" value="80" required></label>
+                <label class="field">Trusted score cutoff<input id="trust-cutoff" class="input" type="number" min="0" max="100" value="60" required></label>
+                <button class="button primary" type="submit">Save protection policy</button>
+              </div>
+              <div class="panel-meta" style="margin-top:10px">At the occupancy ceiling, new untrusted DHCP allocations are deferred. Trusted clients and configured reservations may use remaining eligible addresses. Existing leases are not revoked.</div>
+            </form>
+          </div>
+          <div class="panel" style="margin-top:15px">
+            <div class="filterbar"><div><div class="panel-title">Remembered client MACs</div><div id="trust-count" class="panel-meta">Loading profiles…</div></div><div class="toolbar"><input id="trust-search" class="input search" placeholder="Filter by MAC address"><button class="button" id="trust-search-button">Search</button></div></div>
+            <div class="table-wrap"><table><thead><tr><th>MAC</th><th>Trust</th><th>Scoring</th><th>Successful renewals</th><th>Seen days</th><th>Last seen</th><th>Manual score</th><th>Actions</th></tr></thead><tbody id="trust-table"></tbody></table></div>
+          </div>
+          <div class="panel" style="margin-top:15px"><div class="panel-body" style="color:var(--muted);font-size:12px;line-height:1.7">Automatic score is <code>min(100, 10 × successful client renewals + 2 × distinct UTC-day sightings)</code>. MAC addresses can be spoofed; scores are prioritization evidence, not identity verification. A manual score overrides the automatic score until reset. If every usable address is occupied, quarantined, or reserved, no score can create more capacity.</div></div>
+        </section>
+
         <section id="view-events" class="section">
           <div class="page-head"><div><div class="eyebrow">AUDIT / TELEMETRY</div><h1>Event log</h1><div class="subtitle">Search lease lifecycle events and SIEM alerts.</div></div><button class="button" id="events-refresh">↻ &nbsp;Refresh</button></div>
           <div class="panel">
-            <div class="filterbar"><div><div class="panel-title">JSON audit events</div><div id="event-count" class="panel-meta">Latest events first</div></div><div class="toolbar"><input id="event-search" class="input search" placeholder="Search event, client, address…"><select id="event-type" class="select"><option value="">All event types</option><option>lease_allocated</option><option>lease_assigned</option><option>lease_renewed</option><option>lease_extended</option><option>lease_released</option><option>lease_declined</option><option>lease_expired</option><option>siem_alert</option></select><button class="button" id="event-search-button">Search</button><button class="button" id="event-clear">Clear</button></div></div>
+            <div class="filterbar"><div><div class="panel-title">JSON audit events</div><div id="event-count" class="panel-meta">Latest events first</div></div><div class="toolbar"><input id="event-search" class="input search" placeholder="Search event, client, address…"><select id="event-type" class="select"><option value="">All event types</option><option>lease_allocated</option><option>lease_assigned</option><option>lease_renewed</option><option>lease_extended</option><option>lease_released</option><option>lease_declined</option><option>lease_expired</option><option>lease_allocation_deferred</option><option>siem_alert</option></select><button class="button" id="event-search-button">Search</button><button class="button" id="event-clear">Clear</button></div></div>
             <div class="table-wrap"><table><thead><tr><th>Time</th><th>Event</th><th>Client</th><th>Address</th><th>Details</th></tr></thead><tbody id="events-table"></tbody></table></div>
           </div>
         </section>
@@ -245,7 +266,7 @@
           <div class="page-head"><div><div class="eyebrow">NETWORK / PACKET TELEMETRY</div><h1>DHCP packet log</h1><div class="subtitle">Received and sent DHCP message metadata, stored separately from lease audit events.</div></div><button class="button" id="packets-refresh">↻ &nbsp;Refresh</button></div>
           <div class="panel">
             <div class="filterbar"><div><div class="panel-title">DHCP packets</div><div id="packet-count" class="panel-meta">Latest packets first</div></div><div class="toolbar"><input id="packet-since" class="input" type="datetime-local" aria-label="From time"><input id="packet-until" class="input" type="datetime-local" aria-label="Until time"><input id="packet-source" class="input" placeholder="Source IPv4"><input id="packet-destination" class="input" placeholder="Destination IPv4"><input id="packet-mac" class="input" placeholder="Client MAC"><select id="packet-type" class="select"><option value="">All DHCP types</option><option>DHCPDISCOVER</option><option>DHCPOFFER</option><option>DHCPREQUEST</option><option>DHCPDECLINE</option><option>DHCPACK</option><option>DHCPNAK</option><option>DHCPRELEASE</option><option>DHCPFORCERENEW</option><option>MALFORMED</option><option>UNKNOWN</option></select><button class="button" id="packet-search-button">Search</button><button class="button" id="packet-clear">Clear</button></div></div>
-            <div class="table-wrap"><table><thead><tr><th>Time</th><th>Direction</th><th>DHCP type</th><th>Client MAC</th><th>Source address</th><th>Destination address</th></tr></thead><tbody id="packets-table"></tbody></table></div>
+            <div class="table-wrap"><table><thead><tr><th>Time</th><th>Direction</th><th>DHCP type</th><th>Client MAC</th><th>Trust</th><th>Source address</th><th>Destination address</th></tr></thead><tbody id="packets-table"></tbody></table></div>
           </div>
         </section>
 
@@ -274,7 +295,7 @@
         <section id="view-rules" class="section">
           <div class="page-head"><div><div class="eyebrow">DETECTION / RESPONSE</div><h1>SIEM rules</h1><div class="subtitle">Configure scheduled rules for starvation and pool-exhaustion signals.</div></div><button class="button primary" id="open-rule">＋ &nbsp;Create rule</button></div>
           <div class="panel"><div class="panel-head"><div><div class="panel-title">Configured rules</div><div class="panel-meta">Evaluated on the configured SIEM interval</div></div><button class="button small" id="rules-refresh">↻ Refresh</button></div><div class="table-wrap"><table><thead><tr><th>Rule</th><th>Detection</th><th>Threshold</th><th>Status</th><th>Actions</th></tr></thead><tbody id="rules-table"></tbody></table></div></div>
-          <div class="panel" style="margin-top:15px"><div class="panel-head"><div class="panel-title">About built-in protection rules</div></div><div class="panel-body" style="color:var(--muted);font-size:12px;line-height:1.7">Rapid allocation detection flags a burst of lease allocations that may indicate DHCP starvation. High pool utilization highlights address exhaustion risk. Alerts are logged for investigation; these rules are detection-only and do not rate-limit or block DHCP clients.</div></div>
+          <div class="panel" style="margin-top:15px"><div class="panel-head"><div class="panel-title">About built-in protection rules</div></div><div class="panel-body" style="color:var(--muted);font-size:12px;line-height:1.7">Rules detect unique-MAC discovery churn, per-client bursts, low-trust discovery activity, allocation deferrals, and pool pressure. They emit alerts for investigation. The protected-pool policy separately defers new untrusted allocations after its occupancy ceiling; it does not revoke active leases.</div></div>
         </section>
 
         <section id="view-backups" class="section">
@@ -298,9 +319,14 @@
     <div class="modal"><div class="modal-head"><h2 id="rule-modal-title">Create SIEM rule</h2><button class="button small" data-close="rule-modal" aria-label="Close">×</button></div>
       <form id="rule-form">
         <div class="field"><label for="rule-name">Rule name</label><input id="rule-name" class="input" required maxlength="100" placeholder="Allocation burst"></div>
-        <div class="field"><label for="rule-kind">Detection type</label><select id="rule-kind" class="select"><option value="event_rate">Event rate</option><option value="pool_usage">Pool usage</option><option value="expression">Expression</option></select></div>
+        <div class="field"><label for="rule-kind">Detection type</label><select id="rule-kind" class="select"><option value="event_rate">Event rate</option><option value="pool_usage">Pool usage</option><option value="unique_client_rate">Unique-client discovery churn</option><option value="per_client_rate">Per-client discovery burst</option><option value="low_trust_discover_rate">Low-trust discovery activity</option><option value="expression">Expression</option></select></div>
         <div id="event-fields"><div class="field"><label for="rule-event">Event to monitor</label><select id="rule-event" class="select"><option value="lease_allocated">Lease allocated</option><option value="lease_assigned">Lease assigned</option><option value="lease_renewed">Lease renewed</option><option value="lease_declined">Lease declined</option></select></div><div class="field"><label for="rule-threshold">Trigger count</label><input id="rule-threshold" class="input" type="number" min="1" max="1000000" value="10"></div><div class="field"><label for="rule-window">Time window (seconds)</label><input id="rule-window" class="input" type="number" min="1" max="31536000" value="60"></div></div>
         <div id="pool-fields" hidden><div class="field"><label for="rule-percent">Pool utilization threshold (%)</label><input id="rule-percent" class="input" type="number" min="1" max="100" value="80"></div></div>
+        <div id="discovery-fields" hidden>
+          <div class="field"><label id="discovery-threshold-label" for="discovery-threshold">Trigger count</label><input id="discovery-threshold" class="input" type="number" min="1" max="1000000" value="10"></div>
+          <div class="field"><label for="discovery-window">Time window (seconds)</label><input id="discovery-window" class="input" type="number" min="1" max="2592000" value="60"></div>
+          <div class="field" id="discovery-score-field" hidden><label for="discovery-max-score">Maximum trust score to include</label><input id="discovery-max-score" class="input" type="number" min="0" max="100" value="30"></div>
+        </div>
         <div id="expression-fields" hidden>
           <div class="field"><label for="rule-expression">Condition</label><input id="rule-expression" class="input" required placeholder='count_if("event == \'lease_allocated\'", 60) >= 20'></div>
           <div class="field"><label for="rule-interval">Evaluation interval (seconds)</label><input id="rule-interval" class="input" type="number" min="1" max="2592000" value="60"></div>
@@ -317,13 +343,14 @@
     (() => {
       "use strict";
       const $ = (selector) => document.querySelector(selector);
-      const state = { leases: [], events: [], packets: [], rules: [], backups: [], view: "overview", busy: false };
+      const state = { leases: [], events: [], packets: [], rules: [], backups: [], trustProfiles: [], view: "overview", busy: false };
       let csrfToken = "";
       const eventNames = {
         lease_allocated: "Lease allocated", lease_assigned: "Lease assigned",
         lease_renewed: "Lease renewed", lease_extended: "Lease extended",
         lease_released: "Lease released", lease_declined: "Lease declined",
-        lease_expired: "Lease expired", siem_alert: "SIEM alert"
+        lease_expired: "Lease expired", lease_allocation_deferred: "Allocation deferred",
+        siem_alert: "SIEM alert"
       };
       const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (ch) =>
         ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]
@@ -457,7 +484,7 @@
         const rules = $("#overview-rules");
         if (!state.rules.length) rules.innerHTML = '<div class="empty">No detection rules configured.</div>';
         else rules.innerHTML = state.rules.slice(0, 5).map((rule) =>
-          `<div class="rule-row"><div><div class="rule-name">${escapeHtml(rule.name)}</div><div class="rule-type">${escapeHtml(rule.type === "event_rate" ? `${rule.event_type} · ${rule.threshold} / ${rule.window_seconds}s` : rule.type === "pool_usage" ? `Pool utilization · ${rule.threshold_percent}%` : `${rule.expression} · every ${rule.interval_seconds}s`)}</div></div><span class="badge ${rule.enabled ? "" : "off"}">${rule.enabled ? "Enabled" : "Paused"}</span></div>`
+          `<div class="rule-row"><div><div class="rule-name">${escapeHtml(rule.name)}</div><div class="rule-type">${escapeHtml(ruleSummary(rule))}</div></div><span class="badge ${rule.enabled ? "" : "off"}">${rule.enabled ? "Enabled" : "Paused"}</span></div>`
         ).join("");
         const overview = $("#overview-leases");
         if (!state.leases.length) emptyRow(overview, 4, "No active leases.");
@@ -499,7 +526,7 @@
       function renderPackets(packets) {
         $("#packet-count").textContent = `${packets.length} packets · newest first`;
         const tbody = $("#packets-table");
-        if (!packets.length) { emptyRow(tbody, 6, "No matching DHCP packets."); return; }
+        if (!packets.length) { emptyRow(tbody, 7, "No matching DHCP packets."); return; }
         tbody.replaceChildren();
         packets.forEach((packet) => {
           const row = document.createElement("tr");
@@ -508,6 +535,7 @@
             cell(packet.direction),
             cell(packet.packet_type, "mono"),
             cell(packet.client_mac || "—", "mono"),
+            cell(packet.trust_score === undefined ? "—" : `${packet.trust_score}/100${packet.trusted ? " · trusted" : ""}`),
             cell(packet.source_address, "mono"),
             cell(packet.destination_address, "mono")
           );
@@ -555,14 +583,96 @@
         rules.forEach((rule) => {
           const row = document.createElement("tr");
           row.append(cell(rule.name));
-          row.append(cell(rule.type === "expression" ? "Expression" : rule.type === "event_rate" ? "Event rate" : "Pool utilization"));
-          row.append(cell(rule.type === "event_rate" ? `${rule.threshold} events / ${rule.window_seconds}s (${eventNames[rule.event_type] || rule.event_type})` : rule.type === "pool_usage" ? `${rule.threshold_percent}% pool usage` : `${rule.expression} · every ${rule.interval_seconds}s`));
+          row.append(cell(ruleTypeName(rule.type)));
+          row.append(cell(ruleSummary(rule)));
           row.append(cell(rule.enabled ? "Enabled" : "Paused"));
           const actions = document.createElement("td");
           actions.innerHTML = `<div class="actions"><button class="button small" data-action="toggle-rule" data-id="${escapeHtml(rule.id)}" data-enabled="${rule.enabled}">${rule.enabled ? "Pause" : "Enable"}</button><button class="button small danger" data-action="delete-rule" data-id="${escapeHtml(rule.id)}">Delete</button></div>`;
           row.append(actions);
           tbody.append(row);
         });
+      }
+      function ruleTypeName(type) {
+        return ({
+          event_rate: "Event rate",
+          pool_usage: "Pool utilization",
+          expression: "Expression",
+          unique_client_rate: "Unique-client discovery churn",
+          per_client_rate: "Per-client discovery burst",
+          low_trust_discover_rate: "Low-trust discovery activity"
+        })[type] || type;
+      }
+      function ruleSummary(rule) {
+        if (rule.type === "event_rate") return `${rule.threshold} events / ${rule.window_seconds}s (${eventNames[rule.event_type] || rule.event_type})`;
+        if (rule.type === "pool_usage") return `${rule.threshold_percent}% pool usage`;
+        if (rule.type === "expression") return `${rule.expression} · every ${rule.interval_seconds}s`;
+        if (rule.type === "low_trust_discover_rate") return `${rule.threshold} packets / ${rule.window_seconds}s · score ≤ ${rule.max_score}`;
+        return `${rule.threshold} / ${rule.window_seconds}s`;
+      }
+      function renderTrustProfiles(profiles) {
+        state.trustProfiles = profiles;
+        $("#trust-count").textContent = `${profiles.length} remembered client${profiles.length === 1 ? "" : "s"}`;
+        const tbody = $("#trust-table");
+        if (!profiles.length) { emptyRow(tbody, 8, "No client profiles match."); return; }
+        tbody.replaceChildren();
+        profiles.forEach((profile) => {
+          const row = document.createElement("tr");
+          const trust = document.createElement("td");
+          trust.innerHTML = `<span class="badge ${profile.trusted ? "" : "off"}">${profile.score}/100${profile.trusted ? " · trusted" : ""}</span>`;
+          const actions = document.createElement("td");
+          actions.innerHTML = `<div class="actions"><button class="button small" data-action="trust-override" data-mac="${escapeHtml(profile.mac)}">Set score</button><button class="button small" data-action="trust-reset" data-mac="${escapeHtml(profile.mac)}" ${profile.manual_score === null ? "disabled" : ""}>Reset</button><button class="button small danger" data-action="trust-remove" data-mac="${escapeHtml(profile.mac)}">Remove</button></div>`;
+          row.append(
+            cell(profile.mac, "mono"),
+            trust,
+            cell(`${profile.score_source} · auto ${profile.automatic_score}`),
+            cell(profile.successful_renewals),
+            cell(profile.sighting_days),
+            cell(dateText(profile.last_seen)),
+            cell(profile.manual_score === null ? "—" : profile.manual_score),
+            actions
+          );
+          tbody.append(row);
+        });
+      }
+      async function refreshTrust() {
+        const query = new URLSearchParams({ limit: "1000" });
+        const term = $("#trust-search").value.trim();
+        if (term) query.set("q", term);
+        try {
+          const [policy, profiles] = await Promise.all([
+            api("/api/trust/policy"),
+            api(`/api/trust/clients?${query}`)
+          ]);
+          $("#trust-occupancy").value = policy.occupancy_threshold_percent;
+          $("#trust-cutoff").value = policy.trusted_score_threshold;
+          $("#trust-policy-status").textContent = `${policy.active_pool_addresses}/${policy.pool_capacity} dynamic addresses in use; untrusted allocation ceiling ${policy.untrusted_allocation_limit}; up to ${policy.protected_addresses} addresses protected for trusted clients (${policy.profiles_count} profiles).`;
+          renderTrustProfiles(profiles.profiles || []);
+        } catch (error) { toast(error.message, true); }
+      }
+      async function trustAction(button) {
+        const mac = button.dataset.mac;
+        const action = button.dataset.action;
+        try {
+          if (action === "trust-override") {
+            const current = state.trustProfiles.find((profile) => profile.mac === mac);
+            const value = prompt(`Set manual trust score for ${mac} (0–100). This overrides automatic scoring.`, String(current?.score ?? 0));
+            if (value === null) return;
+            if (!/^(100|[0-9]{1,2})$/.test(value)) throw new Error("Trust score must be an integer from 0 to 100.");
+            await api(`/api/trust/clients/${encodeURIComponent(mac)}`, {
+              method: "PATCH",
+              body: JSON.stringify({ manual_score: Number(value) })
+            });
+          } else if (action === "trust-reset") {
+            await api(`/api/trust/clients/${encodeURIComponent(mac)}`, {
+              method: "PATCH",
+              body: JSON.stringify({ clear_override: true })
+            });
+          } else {
+            if (!confirm(`Remove the remembered trust profile for ${mac}?`)) return;
+            await api(`/api/trust/clients/${encodeURIComponent(mac)}`, { method: "DELETE" });
+          }
+          await refreshTrust();
+        } catch (error) { toast(error.message, true); }
       }
       async function searchLeases() {
         const term = $("#lease-search").value.trim();
@@ -640,9 +750,10 @@
         state.view = view;
         document.querySelectorAll(".section").forEach((section) => section.classList.toggle("active", section.id === `view-${view}`));
         document.querySelectorAll(".nav-link").forEach((link) => link.classList.toggle("active", link.dataset.view === view));
-        const title = ({ overview: "Overview", leases: "Leases", events: "Event log", packets: "DHCP packets", query: "Log query", rules: "SIEM rules", backups: "Backups" })[view];
+        const title = ({ overview: "Overview", leases: "Leases", trust: "Client trust", events: "Event log", packets: "DHCP packets", query: "Log query", rules: "SIEM rules", backups: "Backups" })[view];
         $("#crumb-title").textContent = title;
         if (view === "leases") searchLeases();
+        if (view === "trust") refreshTrust();
         if (view === "events") searchEvents();
         if (view === "packets") searchPackets();
         if (view === "rules") refreshRules();
@@ -707,6 +818,23 @@
       $("#packets-refresh").addEventListener("click", searchPackets);
       $("#rules-refresh").addEventListener("click", refreshRules);
       $("#backup-refresh").addEventListener("click", refreshBackups);
+      $("#trust-refresh").addEventListener("click", refreshTrust);
+      $("#trust-search-button").addEventListener("click", refreshTrust);
+      $("#trust-search").addEventListener("keydown", (event) => { if (event.key === "Enter") refreshTrust(); });
+      $("#trust-policy-form").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        try {
+          await api("/api/trust/policy", {
+            method: "PUT",
+            body: JSON.stringify({
+              occupancy_threshold_percent: Number($("#trust-occupancy").value),
+              trusted_score_threshold: Number($("#trust-cutoff").value)
+            })
+          });
+          toast("Trust protection policy saved.");
+          await refreshTrust();
+        } catch (error) { toast(error.message, true); }
+      });
       $("#backup-create").addEventListener("click", createBackup);
       document.querySelectorAll("[data-refresh]").forEach((button) => button.addEventListener("click", refresh));
       document.querySelectorAll("[data-navigate]").forEach((button) => button.addEventListener("click", () => navigate(button.dataset.navigate)));
@@ -716,6 +844,7 @@
         if (!button) return;
         if (button.dataset.action === "toggle-rule" || button.dataset.action === "delete-rule") ruleAction(button);
         else if (button.dataset.action === "backup-restore") restoreBackup(button.dataset.backup);
+        else if (button.dataset.action.startsWith("trust-")) trustAction(button);
         else leaseAction(button);
       });
       function openModal(id) { $(`#${id}`).classList.add("open"); }
@@ -741,6 +870,14 @@
         $("#event-fields").hidden = kind !== "event_rate";
         $("#pool-fields").hidden = kind !== "pool_usage";
         $("#expression-fields").hidden = kind !== "expression";
+        const discovery = ["unique_client_rate", "per_client_rate", "low_trust_discover_rate"].includes(kind);
+        $("#discovery-fields").hidden = !discovery;
+        $("#discovery-score-field").hidden = kind !== "low_trust_discover_rate";
+        $("#discovery-threshold-label").textContent = kind === "unique_client_rate"
+          ? "Unique client MACs to trigger"
+          : kind === "per_client_rate"
+            ? "DISCOVER packets from one MAC to trigger"
+            : "Low-trust DISCOVER packets to trigger";
       });
       $("#rule-form").addEventListener("submit", async (event) => {
         event.preventDefault();
@@ -751,6 +888,12 @@
           rule.window_seconds = Number($("#rule-window").value);
         } else if (rule.type === "pool_usage") {
           rule.threshold_percent = Number($("#rule-percent").value);
+        } else if (["unique_client_rate", "per_client_rate", "low_trust_discover_rate"].includes(rule.type)) {
+          rule.threshold = Number($("#discovery-threshold").value);
+          rule.window_seconds = Number($("#discovery-window").value);
+          if (rule.type === "low_trust_discover_rate") {
+            rule.max_score = Number($("#discovery-max-score").value);
+          }
         } else {
           rule.expression = $("#rule-expression").value.trim();
           rule.interval_seconds = Number($("#rule-interval").value);
@@ -763,6 +906,8 @@
           $("#event-fields").hidden = false;
           $("#pool-fields").hidden = true;
           $("#expression-fields").hidden = true;
+          $("#discovery-fields").hidden = true;
+          $("#discovery-score-field").hidden = true;
           toast("SIEM rule created.");
           await refreshRules();
         } catch (error) { toast(error.message, true); }

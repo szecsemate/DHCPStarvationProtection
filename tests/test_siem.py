@@ -11,6 +11,7 @@ from unittest.mock import Mock
 
 from dhcp.server import DHCPServer
 from dhcp.siem import SIEMService
+from tests.test_server import FakeSocket, client_packet
 
 
 CLIENT_ONE = "02:00:00:00:00:01"
@@ -39,6 +40,7 @@ class SIEMServiceTests(unittest.TestCase):
             packet_log_file=root / "packets.jsonl",
             backup_dir=root / "backups",
             backup_interval=3600,
+            trust_file=root / "trust.json",
         )
         host, port = self.siem.start_http("0.0.0.0", 0)
         self.assertNotEqual(host, self.server.bind_address)
@@ -117,6 +119,8 @@ class SIEMServiceTests(unittest.TestCase):
         self.assertIn("Client MAC", dashboard)
         self.assertIn("DHCPFORCERENEW", dashboard)
         self.assertIn("SIEM rules", dashboard)
+        self.assertIn("Client trust", dashboard)
+        self.assertIn("Protected-pool policy", dashboard)
         self.assertIn("/api/stats", dashboard)
         self.assertIn("/api/packets", dashboard)
 
@@ -129,7 +133,14 @@ class SIEMServiceTests(unittest.TestCase):
         _, result = self.request("GET", "/api/rules")
         self.assertEqual(
             {rule["id"] for rule in result["rules"]},
-            {"rapid-lease-allocation", "high-pool-usage"},
+            {
+                "rapid-lease-allocation",
+                "high-pool-usage",
+                "unique-discover-churn",
+                "per-client-discover-burst",
+                "low-trust-discover-pressure",
+                "protected-pool-denials",
+            },
         )
         _, result = self.request(
             "POST",
@@ -276,14 +287,19 @@ class SIEMServiceTests(unittest.TestCase):
         client_one = bytes.fromhex("020000000001")
         client_two = bytes.fromhex("020000000002")
         self.server.allocate_address(client_one)
+        self.siem.trust.set_manual_score(CLIENT_ONE, 90)
         checkpoint = self.siem.backups.create_snapshot("test")
         self.server.allocate_address(client_two)
+        self.siem.trust.set_manual_score(CLIENT_ONE, 10)
+        self.siem.trust.observe(CLIENT_TWO, "2025-01-01T12:00:00+00:00")
         self.siem.record_event("lease_assigned", client=CLIENT_TWO, address="192.0.2.11")
 
         restored = self.siem.restore_backup(checkpoint)
 
         self.assertIn(client_one, self.server.leases)
         self.assertNotIn(client_two, self.server.leases)
+        self.assertEqual(self.siem.trust.get_profile(CLIENT_ONE)["score"], 90)
+        self.assertFalse(self.siem.trust.has_profile(CLIENT_TWO))
         self.assertTrue(
             any(
                 event.get("client") == CLIENT_TWO
@@ -293,6 +309,112 @@ class SIEMServiceTests(unittest.TestCase):
         self.assertEqual(restored["restored"], checkpoint)
         self.assertNotEqual(restored["safety_snapshot"], checkpoint)
         self.assertGreaterEqual(len(self.siem.backups.list_snapshots()), 3)
+
+    def test_trust_policy_and_client_management_api(self):
+        _, profile = self.request(
+            "PATCH",
+            "/api/trust/clients/{}".format(CLIENT_ONE),
+            {"manual_score": 100},
+        )
+        self.assertTrue(profile["profile"]["trusted"])
+        _, profiles = self.request("GET", "/api/trust/clients")
+        self.assertEqual(profiles["count"], 1)
+        self.assertEqual(profiles["profiles"][0]["mac"], CLIENT_ONE)
+
+        _, policy = self.request(
+            "PATCH",
+            "/api/trust/policy",
+            {
+                "occupancy_threshold_percent": 70,
+                "trusted_score_threshold": 80,
+            },
+        )
+        self.assertEqual(policy["occupancy_threshold_percent"], 70)
+        _, policy = self.request("GET", "/api/trust/policy")
+        self.assertEqual(policy["trusted_score_threshold"], 80)
+        self.assertEqual(policy["profiles_count"], 1)
+
+        _, profile = self.request(
+            "PATCH",
+            "/api/trust/clients/{}".format(CLIENT_ONE),
+            {"clear_override": True},
+        )
+        self.assertIsNone(profile["profile"]["manual_score"])
+        self.request("DELETE", "/api/trust/clients/{}".format(CLIENT_ONE))
+        self.assertEqual(self.siem.trust.profile_count(), 0)
+
+    def test_valid_discovery_and_acknowledged_renewal_update_trust(self):
+        client = bytes.fromhex("020000000001")
+        sock = FakeSocket()
+
+        self.server.handle_packet(client_packet(1, client), sock)
+        profile = self.siem.trust.get_profile(CLIENT_ONE)
+        self.assertEqual(profile["sighting_days"], 1)
+        received = self.siem.packets.search(
+            {"mac": CLIENT_ONE, "direction": "received"}
+        )
+        self.assertEqual(received[-1]["trust_score"], 2)
+
+        address = self.server.leases[client].address
+        renewal = client_packet(3, client, ciaddr=str(address))
+        self.server.handle_packet(renewal, sock)
+        self.assertEqual(
+            self.siem.trust.get_profile(CLIENT_ONE)["successful_renewals"],
+            1,
+        )
+        self.assertEqual(
+            self.siem.trust.get_profile(CLIENT_ONE)["automatic_score"],
+            12,
+        )
+
+    def test_discovery_rules_measure_unique_bursts_and_low_trust(self):
+        rules = [
+            {
+                "name": "Unique discovery test",
+                "type": "unique_client_rate",
+                "threshold": 2,
+                "window_seconds": 60,
+            },
+            {
+                "name": "Per-client burst test",
+                "type": "per_client_rate",
+                "threshold": 2,
+                "window_seconds": 60,
+            },
+            {
+                "name": "Low-trust discovery test",
+                "type": "low_trust_discover_rate",
+                "threshold": 2,
+                "window_seconds": 60,
+                "max_score": 30,
+            },
+        ]
+        created = [self.siem.create_rule(rule) for rule in rules]
+        self.siem.record_packet(
+            direction="received",
+            packet_type="DHCPDISCOVER",
+            source_address="0.0.0.0",
+            destination_address="255.255.255.255",
+            client_mac=CLIENT_ONE,
+        )
+        self.siem.record_packet(
+            direction="received",
+            packet_type="DHCPDISCOVER",
+            source_address="0.0.0.0",
+            destination_address="255.255.255.255",
+            client_mac=CLIENT_ONE,
+        )
+        self.siem.record_packet(
+            direction="received",
+            packet_type="DHCPDISCOVER",
+            source_address="0.0.0.0",
+            destination_address="255.255.255.255",
+            client_mac=CLIENT_TWO,
+        )
+
+        alerts = self.siem.evaluate_rules()
+        alert_ids = {alert["rule_id"] for alert in alerts}
+        self.assertTrue({rule["id"] for rule in created}.issubset(alert_ids))
 
     def test_corrupt_backup_is_rejected_without_changing_live_state(self):
         client = bytes.fromhex("020000000001")
