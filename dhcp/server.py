@@ -214,9 +214,18 @@ class DHCPServer:
         """Process one DHCP client packet and send a reply when appropriate."""
         if destination_address is None or destination_address[0] == "0.0.0.0":
             destination_address = (str(self.server_ip), self.port)
+        packet_type = self._packet_type(packet)
+        LOG.info(
+            "Received %s from %s:%d on %s:%d",
+            packet_type,
+            source_address[0],
+            source_address[1],
+            destination_address[0],
+            destination_address[1],
+        )
         self._log_packet(
             "received",
-            self._packet_type(packet),
+            packet_type,
             source_address,
             destination_address,
         )
@@ -310,7 +319,20 @@ class DHCPServer:
                 return
 
         response_destination = self._response_destination(header, response_type)
-        sock.sendto(response, response_destination)
+        LOG.info(
+            "Sending %s to %s:%d",
+            DHCP_MESSAGE_TYPES[response_type],
+            response_destination[0],
+            response_destination[1],
+        )
+        sent_bytes = sock.sendto(response, response_destination)
+        LOG.info(
+            "Sent %s (%d bytes) to %s:%d",
+            DHCP_MESSAGE_TYPES[response_type],
+            sent_bytes,
+            response_destination[0],
+            response_destination[1],
+        )
         self._log_packet(
             "sent",
             DHCP_MESSAGE_TYPES[response_type],
