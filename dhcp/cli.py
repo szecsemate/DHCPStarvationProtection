@@ -35,6 +35,13 @@ def parse_args():
         help="JSON file used to persist leases and declined addresses",
     )
     parser.add_argument("--bind-address", default="0.0.0.0")
+    parser.add_argument(
+        "--dhcp-interface",
+        help=(
+            "Linux network interface for DHCP broadcasts; use with "
+            "--bind-address 0.0.0.0"
+        ),
+    )
     parser.add_argument("--port", type=int, default=67, help="UDP port (default: 67)")
     parser.add_argument(
         "--http-bind-address",
@@ -87,6 +94,7 @@ def main():
             decline_hold_seconds=args.decline_hold_seconds,
             bind_address=args.bind_address,
             port=args.port,
+            interface=args.dhcp_interface,
             lease_file=args.lease_file,
             reservations=reservations,
         )

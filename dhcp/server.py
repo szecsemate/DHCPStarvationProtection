@@ -46,6 +46,7 @@ class DHCPServer:
         decline_hold_seconds=3600,
         domain_name=None,
         ntp_servers=(),
+        interface=None,
     ):
         self.server_ip = ipaddress.IPv4Address(server_ip)
         self.network = ipaddress.IPv4Network(
@@ -90,6 +91,13 @@ class DHCPServer:
         self.lease_seconds = lease_seconds
         self.bind_address = bind_address
         self.port = port
+        if interface is not None and not interface:
+            raise ValueError("DHCP interface name must not be empty")
+        if interface is not None and bind_address != "0.0.0.0":
+            raise ValueError(
+                "--dhcp-interface requires --bind-address 0.0.0.0 to receive broadcasts"
+            )
+        self.interface = interface
         self.packet_callback = None
         self.lease_manager = LeaseManager(
             network=self.network,
@@ -345,11 +353,25 @@ class DHCPServer:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            if self.interface is not None:
+                interface_option = getattr(socket, "SO_BINDTODEVICE", None)
+                if interface_option is None:
+                    raise OSError(
+                        "--dhcp-interface is supported only on Linux systems"
+                    )
+                sock.setsockopt(
+                    socket.SOL_SOCKET,
+                    interface_option,
+                    self.interface.encode("utf-8") + b"\0",
+                )
             sock.bind((self.bind_address, self.port))
             LOG.info(
-                "Listening on %s:%d; offering %s-%s",
+                "Listening on %s:%d%s; offering %s-%s",
                 self.bind_address,
                 self.port,
+                " on interface {}".format(self.interface)
+                if self.interface is not None
+                else "",
                 self.pool_start,
                 self.pool_end,
             )

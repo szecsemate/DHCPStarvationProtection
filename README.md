@@ -68,6 +68,21 @@ desired interface. On Debian/Linux, Python 3 and no third-party packages are
 required; binding DHCP's default UDP port 67 requires root or equivalent
 network capabilities. On Windows, use an elevated terminal when needed.
 
+DHCP clients send their initial DISCOVER to the IPv4 broadcast address. For
+reliable broadcast reception on a multihomed Debian/Linux server, bind the UDP
+socket to all local IPv4 addresses and restrict it to the client-facing NIC
+with `--dhcp-interface`:
+
+```sh
+sudo python3 main.py --server-ip 10.0.0.1 --subnet-mask 255.255.255.0 --pool-start 10.0.0.10 --pool-end 10.0.0.200 --bind-address 0.0.0.0 --dhcp-interface enp0s3
+```
+
+Replace `enp0s3` with the client-facing interface name shown by `ip -br
+address`. `--dhcp-interface` uses Linux `SO_BINDTODEVICE`, so it is specific
+to Linux and must be paired with `--bind-address 0.0.0.0`; binding only to
+the interface's unicast IP can prevent the socket from receiving broadcast
+DHCPDISCOVER packets.
+
 ### Options
 
 | Option | Required | Default | Description |
@@ -85,6 +100,7 @@ network capabilities. On Windows, use an elevated terminal when needed.
 | `--decline-hold-seconds` | No | `3600` | How long to quarantine a declined address |
 | `--lease-file` | No | `dhcp_leases.json` | JSON file for persistent leases and quarantines |
 | `--bind-address` | No | `0.0.0.0` | Local IPv4 address to bind |
+| `--dhcp-interface` | No | None | Linux NIC to receive DHCP broadcasts on; use with `--bind-address 0.0.0.0` |
 | `--port` | No | `67` | UDP listening port |
 | `--http-bind-address` | No | `0.0.0.0` | Dashboard HTTP IPv4 bind address; defaults to all interfaces |
 | `--http-port` | No | `8080` | Dashboard HTTP port |

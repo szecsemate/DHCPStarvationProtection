@@ -47,6 +47,8 @@ class CommandLineTests(unittest.TestCase):
                 "10.0.0.5",
                 "--dhcp-packet-log-file",
                 "/var/log/dhcp/packets.jsonl",
+                "--dhcp-interface",
+                "enp0s3",
             ],
         ):
             args = parse_args()
@@ -54,6 +56,7 @@ class CommandLineTests(unittest.TestCase):
         self.assertEqual(args.bind_address, "192.0.2.1")
         self.assertEqual(args.http_bind_address, "10.0.0.5")
         self.assertEqual(args.dhcp_packet_log_file, "/var/log/dhcp/packets.jsonl")
+        self.assertEqual(args.dhcp_interface, "enp0s3")
 
 
 if __name__ == "__main__":

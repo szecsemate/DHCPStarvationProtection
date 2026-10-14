@@ -1,4 +1,5 @@
 import ipaddress
+import socket
 import tempfile
 import threading
 import unittest
@@ -57,6 +58,10 @@ class FakeSocket:
 
 
 class InterruptingSocket:
+    def __init__(self):
+        self.options = []
+        self.bound_address = None
+
     def __enter__(self):
         return self
 
@@ -64,10 +69,10 @@ class InterruptingSocket:
         return False
 
     def setsockopt(self, *args):
-        pass
+        self.options.append(args)
 
     def bind(self, address):
-        pass
+        self.bound_address = address
 
     def getsockname(self):
         return ("192.0.2.1", 67)
@@ -280,6 +285,41 @@ class DHCPServerTests(unittest.TestCase):
     def test_ctrl_c_during_receive_stops_server_without_traceback(self):
         with patch("dhcp.server.socket.socket", return_value=InterruptingSocket()):
             self.server.serve_forever()
+
+    def test_dhcp_interface_binds_device_and_listens_for_broadcasts(self):
+        server = DHCPServer(
+            SERVER_IP,
+            "192.0.2.10",
+            "192.0.2.12",
+            "255.255.255.0",
+            bind_address="0.0.0.0",
+            interface="enp0s3",
+            lease_file=None,
+        )
+        fake_socket = InterruptingSocket()
+        with (
+            patch("dhcp.server.socket.socket", return_value=fake_socket),
+            patch("dhcp.server.socket.SO_BINDTODEVICE", 25, create=True),
+        ):
+            server.serve_forever()
+
+        self.assertIn(
+            (socket.SOL_SOCKET, 25, b"enp0s3\0"),
+            fake_socket.options,
+        )
+        self.assertEqual(fake_socket.bound_address, ("0.0.0.0", 67))
+
+    def test_dhcp_interface_rejects_specific_ip_bind(self):
+        with self.assertRaisesRegex(ValueError, "requires --bind-address 0.0.0.0"):
+            DHCPServer(
+                SERVER_IP,
+                "192.0.2.10",
+                "192.0.2.12",
+                "255.255.255.0",
+                bind_address="192.0.2.1",
+                interface="enp0s3",
+                lease_file=None,
+            )
 
     def test_concurrent_allocations_are_unique(self):
         clients = [index.to_bytes(6, "big") for index in range(1, 20)]
