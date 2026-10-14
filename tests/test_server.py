@@ -3,6 +3,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from dhcp.protocol import (
     BOOTREQUEST,
@@ -53,6 +54,26 @@ class FakeSocket:
 
     def sendto(self, packet, destination):
         self.sent.append((packet, destination))
+
+
+class InterruptingSocket:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return False
+
+    def setsockopt(self, *args):
+        pass
+
+    def bind(self, address):
+        pass
+
+    def getsockname(self):
+        return ("192.0.2.1", 67)
+
+    def recvfrom(self, size):
+        raise KeyboardInterrupt
 
 
 class DHCPServerTests(unittest.TestCase):
@@ -255,6 +276,10 @@ class DHCPServerTests(unittest.TestCase):
                 },
             ],
         )
+
+    def test_ctrl_c_during_receive_stops_server_without_traceback(self):
+        with patch("dhcp.server.socket.socket", return_value=InterruptingSocket()):
+            self.server.serve_forever()
 
     def test_concurrent_allocations_are_unique(self):
         clients = [index.to_bytes(6, "big") for index in range(1, 20)]

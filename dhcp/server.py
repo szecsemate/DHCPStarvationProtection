@@ -331,16 +331,19 @@ class DHCPServer:
                 self.pool_start,
                 self.pool_end,
             )
-            while True:
-                packet, source_address = sock.recvfrom(4096)
-                try:
-                    self.handle_packet(
-                        packet,
-                        sock,
-                        source_address,
-                        sock.getsockname(),
-                    )
-                except (ValueError, struct.error) as error:
-                    LOG.warning("Ignoring malformed DHCP packet: %s", error)
-                except OSError:
-                    LOG.exception("DHCP packet handling, logging, or reply failed")
+            try:
+                while True:
+                    packet, source_address = sock.recvfrom(4096)
+                    try:
+                        self.handle_packet(
+                            packet,
+                            sock,
+                            source_address,
+                            sock.getsockname(),
+                        )
+                    except (ValueError, struct.error) as error:
+                        LOG.warning("Ignoring malformed DHCP packet: %s", error)
+                    except OSError:
+                        LOG.exception("DHCP packet handling, logging, or reply failed")
+            except KeyboardInterrupt:
+                LOG.info("DHCP server stopped")
