@@ -45,13 +45,28 @@ DHCPStarvationProtection/
 Choose a server address and address pool in the same subnet. The server address
 must not be inside the dynamic pool.
 
-```powershell
-python main.py --server-ip 192.168.1.1 --subnet-mask 255.255.255.0 --pool-start 192.168.1.100 --pool-end 192.168.1.200 --dns 1.1.1.1
+```sh
+python3 main.py --server-ip 192.168.1.1 --subnet-mask 255.255.255.0 --pool-start 192.168.1.100 --pool-end 192.168.1.200 --dns 1.1.1.1
 ```
 
 By default, it listens on all IPv4 interfaces at UDP port 67 and saves leases
-to `dhcp_leases.json` in the current directory. The HTTP API listens on
-`127.0.0.1:8080`. Stop both services with Ctrl+C.
+to `dhcp_leases.json` in the current directory. The HTTP API listens on all
+IPv4 interfaces at port 8080 by default. Stop both services with Ctrl+C.
+
+The DHCP and HTTP services have independent bind addresses. For example, on
+Debian/Linux, set each to the address of its own interface (both addresses
+must be configured on the machine):
+
+```sh
+sudo python3 main.py --server-ip 192.168.1.1 --subnet-mask 255.255.255.0 --pool-start 192.168.1.100 --pool-end 192.168.1.200 --bind-address 192.168.1.1 --http-bind-address 10.0.0.5
+```
+
+`--bind-address` selects the DHCP UDP listener address; `--http-bind-address`
+selects the dashboard/API listener address. Use `0.0.0.0` for either option
+to listen on all IPv4 interfaces, or specify an address assigned to the
+desired interface. On Debian/Linux, Python 3 and no third-party packages are
+required; binding DHCP's default UDP port 67 requires root or equivalent
+network capabilities. On Windows, use an elevated terminal when needed.
 
 ### Options
 
@@ -71,7 +86,7 @@ to `dhcp_leases.json` in the current directory. The HTTP API listens on
 | `--lease-file` | No | `dhcp_leases.json` | JSON file for persistent leases and quarantines |
 | `--bind-address` | No | `0.0.0.0` | Local IPv4 address to bind |
 | `--port` | No | `67` | UDP listening port |
-| `--http-bind-address` | No | `127.0.0.1` | Dashboard HTTP bind address |
+| `--http-bind-address` | No | `0.0.0.0` | Dashboard HTTP IPv4 bind address; defaults to all interfaces |
 | `--http-port` | No | `8080` | Dashboard HTTP port |
 | `--siem-log-file` | No | `siem_events.jsonl` | JSON-lines audit log |
 | `--siem-rules-file` | No | `siem_rules.json` | Persistent SIEM rules |
@@ -80,16 +95,16 @@ to `dhcp_leases.json` in the current directory. The HTTP API listens on
 For example, advertise a router, DNS and NTP servers, a domain, and reserve an
 address for one Ethernet client:
 
-```powershell
-python main.py --server-ip 192.168.1.2 --subnet-mask 255.255.255.0 --pool-start 192.168.1.100 --pool-end 192.168.1.200 --router 192.168.1.1 --dns 1.1.1.1 --dns 8.8.8.8 --ntp 192.168.1.10 --domain-name example.test --reservation 02:00:00:00:00:01=192.168.1.50
+```sh
+python3 main.py --server-ip 192.168.1.2 --subnet-mask 255.255.255.0 --pool-start 192.168.1.100 --pool-end 192.168.1.200 --router 192.168.1.1 --dns 1.1.1.1 --dns 8.8.8.8 --ntp 192.168.1.10 --domain-name example.test --reservation 02:00:00:00:00:01=192.168.1.50
 ```
 
-Use `python main.py --help` to see all command-line options.
+Use `python3 main.py --help` to see all command-line options.
 
 Run the unit tests with:
 
-```powershell
-python -m unittest
+```sh
+python3 -m unittest
 ```
 
 ## Implemented behavior
@@ -121,13 +136,15 @@ python -m unittest
 
 ## Lease management and SIEM dashboard
 
-Open `http://127.0.0.1:8080/` in a browser while the server is running. The
+Open `http://<http-interface-address>:8080/` in a browser while the server is
+running (for example, `http://10.0.0.5:8080/` for the example above). The
 dashboard provides an overview of active leases, pool utilization and alerts,
 searchable lease management (assign, renew, extend, release), searchable audit
 events, and SIEM rule creation, enable/disable, and deletion. It refreshes
-automatically every 10 seconds. The HTTP service has no authentication, so
-keep the default loopback binding unless you provide network access controls.
-Do not expose it to an untrusted network.
+automatically every 10 seconds. The HTTP service has no authentication and
+binds to all IPv4 interfaces by default. Restrict access with a firewall or
+bind it to a trusted interface/address; do not expose it to an untrusted
+network.
 
 The site uses these JSON endpoints internally:
 
@@ -192,5 +209,6 @@ from DHCP lease state; back up both JSON files.
 
 Run the server only on an isolated test network or a network where you are
 authorized to provide DHCP. Multiple DHCP servers on one network can issue
-conflicting configuration to clients. Binding to port 67 usually requires an
-elevated PowerShell window on Windows.
+conflicting configuration to clients. Binding to UDP port 67 usually requires
+root or the appropriate network capability on Debian/Linux, and an elevated
+terminal on Windows.

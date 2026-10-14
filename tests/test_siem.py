@@ -24,6 +24,7 @@ class SIEMServiceTests(unittest.TestCase):
             "192.0.2.10",
             "192.0.2.12",
             "255.255.255.0",
+            bind_address="192.0.2.1",
             lease_file=root / "leases.json",
         )
         self.siem = SIEMService(
@@ -32,8 +33,9 @@ class SIEMServiceTests(unittest.TestCase):
             rules_file=root / "rules.json",
             evaluation_interval=60,
         )
-        host, port = self.siem.start_http("127.0.0.1", 0)
-        self.base_url = "http://{}:{}".format(host, port)
+        host, port = self.siem.start_http("0.0.0.0", 0)
+        self.assertNotEqual(host, self.server.bind_address)
+        self.base_url = "http://127.0.0.1:{}".format(port)
 
     def tearDown(self):
         self.siem.close()

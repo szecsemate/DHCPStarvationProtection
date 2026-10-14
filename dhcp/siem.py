@@ -386,7 +386,7 @@ class SIEMService:
             except (OSError, ValueError):
                 LOG.exception("SIEM rule evaluation failed")
 
-    def start_http(self, host="127.0.0.1", port=8080):
+    def start_http(self, host="0.0.0.0", port=8080):
         service = self
 
         class Handler(BaseHTTPRequestHandler):

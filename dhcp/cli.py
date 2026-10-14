@@ -38,8 +38,8 @@ def parse_args():
     parser.add_argument("--port", type=int, default=67, help="UDP port (default: 67)")
     parser.add_argument(
         "--http-bind-address",
-        default="127.0.0.1",
-        help="Lease/SIEM HTTP bind address (default: localhost)",
+        default="0.0.0.0",
+        help="Lease/SIEM HTTP IPv4 bind address (default: all interfaces)",
     )
     parser.add_argument(
         "--http-port", type=int, default=8080, help="Lease/SIEM HTTP port (default: 8080)"
