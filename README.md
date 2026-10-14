@@ -21,7 +21,11 @@ The server uses only Python's standard library.
 
 The code is organized into a [dhcp](dhcp) package, a [tests](tests) directory,
 and a [docs](docs) directory. See [docs/MODULES.md](docs/MODULES.md) for the
-module dependency diagram and connections between the main functions.
+module dependency diagram and
+[docs/TECHNICAL-DESIGN.md](docs/TECHNICAL-DESIGN.md) for detailed execution,
+protocol, state, persistence, logging, and API behavior. The
+[DHCP broadcast incident report](docs/INCIDENT-REPORT-2026-10-14-DHCP-BROADCAST.md)
+covers the Debian/Proxmox multi-interface troubleshooting case.
 
 ```text
 DHCPStarvationProtection/
@@ -32,8 +36,11 @@ DHCPStarvationProtection/
 │   ├── server.py          DHCP message handling and UDP socket
 │   └── siem.py            HTTP API, separate lease/packet logs, and SIEM rules
 ├── docs/
-│   └── MODULES.md         module and function connections
+│   ├── MODULES.md         module and function connections
+│   ├── TECHNICAL-DESIGN.md detailed implementation walkthrough
+│   └── INCIDENT-REPORT-2026-10-14-DHCP-BROADCAST.md
 ├── tests/
+│   ├── test_cli.py        CLI configuration tests
 │   ├── test_server.py     server and lease unit tests
 │   └── test_siem.py       HTTP API and SIEM rule tests
 ├── main.py                root launcher

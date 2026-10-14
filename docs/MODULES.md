@@ -1,14 +1,18 @@
 # Module and Function Connections
 
-This note describes how the Python files fit together and how a DHCP packet
-travels through the code. Start the program from the repository root with
-`python main.py`.
+This document is a concise map of the repository and the main execution paths.
+For packet formats, state transitions, persistence, logging, and API details,
+see [TECHNICAL-DESIGN.md](TECHNICAL-DESIGN.md). For the resolved Proxmox
+broadcast issue, see the
+[incident report](INCIDENT-REPORT-2026-10-14-DHCP-BROADCAST.md).
+
+Start the program from the repository root with `python3 main.py`.
 
 ## Module overview
 
 ```text
 main.py                  root launcher
-  └── dhcp/cli.py        command-line setup
+  └── dhcp/cli.py        parse configuration and coordinate services
         ├── dhcp/protocol.py
         ├── dhcp/server.py
         │     ├── dhcp/protocol.py
@@ -17,134 +21,93 @@ main.py                  root launcher
         └── dhcp/siem.py
               └── dhcp/protocol.py
 
-tests/test_server.py
-  ├── dhcp/protocol.py
-  └── dhcp/server.py
+dhcp/dashboard.html      browser client for the HTTP API
+
+tests/
+  ├── test_cli.py        CLI defaults and independent bind/log settings
+  ├── test_server.py     DHCP packet and lease behavior
+  └── test_siem.py       HTTP API, logs, and SIEM rules
 ```
 
 | File | Responsibility |
 | --- | --- |
-| [main.py](../main.py) | Small root launcher that keeps `python main.py` as the entry command. |
-| [dhcp/cli.py](../dhcp/cli.py) | Command-line arguments, configuration parsing, server startup, and top-level error reporting. |
-| [dhcp/protocol.py](../dhcp/protocol.py) | BOOTP/DHCP constants, lease data type, DHCP option parsing/encoding, and MAC/reservation parsing. |
-| [dhcp/server.py](../dhcp/server.py) | Server configuration validation, DHCP message handling, reply construction, routing replies, and UDP socket loop. |
-| [dhcp/leases.py](../dhcp/leases.py) | Address allocation, static reservation ownership, lease renew/release, DECLINE quarantine, expiry, and JSON persistence. |
-| [dhcp/siem.py](../dhcp/siem.py) | Dashboard-serving HTTP server, JSON API, JSON-lines audit log, lease administration, and persisted scheduled rules. |
-| [dhcp/dashboard.html](../dhcp/dashboard.html) | Browser dashboard for lease search/actions, event logs, and SIEM rules. |
-| [tests/test_server.py](../tests/test_server.py) | Synthetic DHCP packets and unit tests for server and lease behavior. |
-| [tests/test_siem.py](../tests/test_siem.py) | HTTP lease-management and SIEM rule tests. |
+| [main.py](../main.py) | Root launcher that calls `dhcp.cli.main()`. |
+| [dhcp/cli.py](../dhcp/cli.py) | CLI options, object construction, service startup, and startup error reporting. |
+| [dhcp/protocol.py](../dhcp/protocol.py) | BOOTP/DHCP constants, message names, lease data type, option parsing/encoding, and MAC/reservation parsing. |
+| [dhcp/server.py](../dhcp/server.py) | DHCP configuration validation, UDP receive loop, message processing, reply encoding/routing, and packet callback. |
+| [dhcp/leases.py](../dhcp/leases.py) | Lease allocation/validation, reservations, release/decline/expiry, locking, and atomic JSON persistence. |
+| [dhcp/siem.py](../dhcp/siem.py) | HTTP API/dashboard host, lease/SIEM event log, separate DHCP packet log, and scheduled rules. |
+| [dhcp/dashboard.html](../dhcp/dashboard.html) | Browser UI for leases, lease/SIEM events, DHCP packet search, and rule administration. |
+| [tests/test_cli.py](../tests/test_cli.py) | CLI defaults and configuration parsing. |
+| [tests/test_server.py](../tests/test_server.py) | Synthetic DHCP packets and server/lease tests, including broadcast-interface binding. |
+| [tests/test_siem.py](../tests/test_siem.py) | HTTP endpoints, independent log search, and rule behavior. |
 
-## Startup flow
+## Startup and shutdown
 
-1. Python runs the `if __name__ == "__main__"` block in [main.py](../main.py),
-   which imports and calls `main()` from [dhcp/cli.py](../dhcp/cli.py).
-2. `main()` calls `parse_args()` to read the network and lease settings.
-3. `main()` uses `parse_reservation()` from [dhcp/protocol.py](../dhcp/protocol.py)
-   to convert each `MAC=IPv4` argument to a client identifier and address.
-4. `main()` constructs `DHCPServer` from [dhcp/server.py](../dhcp/server.py).
-   Its constructor validates the subnet, pool, and advertised options, then
-   creates a `LeaseManager`.
-5. `LeaseManager` loads saved lease and quarantine state from the configured
-   JSON file, if the file exists.
-6. `main()` starts `SIEMService`, which binds the HTTP API and evaluates rules
-   periodically while `DHCPServer.serve_forever()` dispatches DHCP packets.
+1. `main.py` imports and calls `dhcp.cli.main()`.
+2. `parse_args()` reads the server address, subnet, pool, bind settings, file
+   paths, and optional DHCP configuration. Reservation arguments are parsed
+   with `parse_reservation()`.
+3. `main()` constructs `DHCPServer`; its constructor validates the IPv4
+   network, pool, timers, and advertised options, then constructs
+   `LeaseManager` and loads saved state.
+4. `main()` constructs `SIEMService`. It creates the two JSON-lines logs,
+   connects the lease and packet callbacks, loads/creates SIEM rules, and
+   starts the rule-scheduler thread.
+5. `SIEMService.start_http()` starts the threaded HTTP server. The main thread
+   then enters `DHCPServer.serve_forever()` and blocks in `recvfrom()`.
+6. Ctrl+C during the DHCP receive loop is handled as normal shutdown. The
+   `finally` block in `main()` closes the HTTP server and stops/joins the
+   SIEM scheduler.
 
-## DHCP packet flow
+## DHCP packet path
 
-1. `DHCPServer.handle_packet()` checks the BOOTP header and invokes
-   `parse_options()` from [dhcp/protocol.py](../dhcp/protocol.py).
-2. For DISCOVER, it calls `DHCPServer.allocate_address()`, which delegates to
-   `LeaseManager.allocate()`. The server then builds an OFFER with
-   `DHCPServer.build_reply()`.
-3. For REQUEST, the server determines the requested/current address and calls
-   `DHCPServer.assign_address()`, delegating validation and lease renewal to
-   `LeaseManager.assign()`. The server builds an ACK on success or a NAK when
-   the request cannot be satisfied.
-4. For DECLINE and RELEASE, `handle_packet()` asks `LeaseManager.decline()` or
-   `LeaseManager.release()` to update state. Declined addresses are temporarily
-   quarantined; released leases become available again.
-5. Lease mutations and expiry call `LeaseManager._persist_state()`, which
-   atomically updates the JSON state file.
-6. For a reply, `DHCPServer._response_destination()` selects the relay,
-   client, or broadcast destination, and `handle_packet()` sends the response.
-7. Lease changes notify `SIEMService`, which appends JSON audit events and
-   evaluates configured rules against recent events and active pool usage.
+1. The UDP loop receives a datagram and its source endpoint. It calls
+   `handle_packet()` with that source and the socket's local endpoint.
+2. The server logs packet metadata, validates the fixed BOOTP header, and
+   parses the DHCP magic cookie/options using `parse_options()`.
+3. It dispatches DHCPDISCOVER, DHCPREQUEST, DHCPDECLINE, or DHCPRELEASE.
+   Unsupported message types are ignored. DISCOVER allocates or reuses a
+   lease, then builds an OFFER. REQUEST is checked against the current
+   lease/requested address and produces an ACK or NAK. DECLINE quarantines a
+   matching lease; RELEASE removes a matching lease. Neither produces a
+   reply in the current implementation.
+4. Replies encode a BOOTP reply header and DHCP options in `build_reply()`.
+   `_response_destination()` selects the relay, client, or broadcast
+   destination. `sendto()` sends the reply; successful sends are then recorded
+   in the packet log.
+5. Lease operations emit lease/SIEM audit events through the callback wired by
+   `SIEMService`. Packet metadata is sent through a separate callback/log.
 
-## Function map
+`lease_allocated` means the server allocated/persisted state while handling
+DISCOVER; by itself it does not prove that an OFFER reached the client or that
+the DHCP exchange completed.
 
-### `main.py` and `dhcp/cli.py`
+## State and HTTP/SIEM
 
-- The root `main.py` imports and calls `dhcp.cli.main()` for a stable launch command.
-- `parse_args()` in `dhcp/cli.py` defines and parses command-line options.
-- `main()` parses reservation strings, constructs `DHCPServer`, starts its
-  HTTP SIEM service and UDP socket loop, and converts configuration/startup
-  errors into command-line errors.
-
-### `dhcp/protocol.py`
-
-- `parse_options(packet)` validates the DHCP cookie and decodes packet options.
-- `encode_option(code, value)` serializes one option for a server response.
-- `parse_mac(value)` converts common textual MAC formats into six bytes.
-- `parse_reservation(value)` splits a `MAC=IPv4` string and parses its fields.
-- `Lease` stores an IPv4 address and a monotonic expiration time.
-- The `BOOTREQUEST`, cookie, zero/broadcast IP, and DHCP message constants are
-  shared by packet handling, lease state, and tests.
-
-### `dhcp/server.py`
-
-- `DHCPServer.__init__()` validates the network configuration and initializes
-  `LeaseManager`.
-- `allocate_address()` and `assign_address()` are small delegators to the lease
-  manager, keeping packet handling separate from allocation policy.
-- `build_reply()` encodes the BOOTP response header and configured DHCP options.
-- `_response_destination()` chooses where the reply should be sent.
-- `handle_packet()` dispatches DISCOVER, REQUEST, DECLINE, and RELEASE messages
-  to the appropriate lease and reply methods.
-- `serve_forever()` receives UDP datagrams, calls `handle_packet()`, and logs
-  malformed packets or operational errors.
-- `leases` and `quarantined` properties expose manager state for diagnostics
-  and existing callers.
-
-### `dhcp/leases.py`
-
-- `LeaseManager.__init__()` validates and indexes MAC reservations and loads
-  persisted state.
-- `_address_is_valid()` checks whether a client is allowed to use an address.
-- `_persist_state()` atomically serializes active leases and quarantine expiry.
-- `load_state()` validates saved records and rebuilds monotonic expirations.
-- `expire()` removes expired leases/quarantines and saves state if it changed.
-- `allocate()` returns a reserved or first available dynamic address.
-- `assign()` validates and renews a client lease.
-- `release()` removes only the client's matching lease.
-- `decline()` removes a matching lease and quarantines the address.
-
-### `dhcp/siem.py` and `dhcp/dashboard.html`
-
-- `SIEMService.start_http()` serves the dashboard at `/` and the JSON API from
-  the standard-library threaded HTTP server.
-- `DHCPServer` reports each received packet and successfully sent reply to the
-  SIEM service, which writes them to its separate DHCP packet JSON-lines log.
-- `GET /api/packets` filters packet records by time range, source/destination
-  IPv4 address, and DHCP message type.
-- The dashboard calls the JSON API to show pool/lease metrics, search leases
-  and audit events, and manage leases and detection rules.
-- Lease endpoints search, assign, renew, extend, and release active leases.
-- `JsonEventLog` appends and searches the independent lease/SIEM audit and DHCP
-  packet JSON-lines logs.
-- Rule endpoints create, list, update, and delete persisted `event_rate` and
-  `pool_usage` rules; a background scheduler evaluates enabled rules.
-- The default rules report rapid lease allocations and high pool utilization
-  as searchable SIEM alerts. They detect but do not block clients.
+- `LeaseManager` guards in-process lease/quarantine state with an `RLock`.
+  Expiration is monotonic while running; JSON persistence converts expiry to
+  wall-clock timestamps and atomically replaces the state file.
+- `JsonEventLog` appends timestamped JSONL records with in-process
+  synchronization and `fsync`. The lease/SIEM log and packet log are separate
+  instances/files.
+- `GET /api/packets` searches packet metadata by inclusive time bounds,
+  source/destination IPv4, and DHCP type. Other API routes expose leases,
+  lease/SIEM events, stats, and rule management.
+- The SIEM scheduler evaluates event-rate and pool-usage rules, appending
+  alerts to the lease/SIEM event log. It does not block or rate-limit clients.
+- The dashboard is served from the package-local `dashboard.html` and calls
+  the same-origin JSON API. It has no authentication; network access must be
+  restricted outside a trusted lab.
 
 ## Tests and dependencies
 
-`tests/test_server.py` builds packets using the protocol constants and sends
-them through `DHCPServer.handle_packet()` with an in-memory fake socket. This
-exercises packet and lease behavior without binding to a real network
-interface. Run the suite from the repository root with `python -m unittest`.
+The project uses Python's standard library. Run tests from the repository root
+with `python3 -m unittest`. Server tests use synthetic DHCP packets and a fake
+socket; they do not require a live interface or prove delivery on a Proxmox
+network.
 
-The import direction is one-way: `main.py` starts the CLI; `dhcp/cli.py` uses
-the protocol helpers and server, and starts `dhcp/siem.py`; `dhcp/siem.py`
-uses the server/lease manager, while `dhcp/server.py` uses protocol utilities
-and lease management. `dhcp/leases.py` uses the protocol's `Lease` data class
-and MAC parser. `dhcp/protocol.py` does not import the server or lease manager.
+The import direction is one-way: the CLI coordinates the protocol, server,
+lease manager, and SIEM service; the server uses protocol utilities and lease
+management; the lease manager uses protocol data/helpers. The dashboard is a
+static HTTP resource and does not participate in server-side packet handling.
